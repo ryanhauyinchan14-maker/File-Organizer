@@ -1,61 +1,94 @@
 """
-Easy File Organizer for Windows 10/11 (Security-Hardened Edition)
-=================================================================
-A modern, compact, beginner-friendly desktop utility that sorts loose files
-into neat category subfolders in 3 simple steps, backed by enterprise-grade
-defensive programming and filesystem security controls.
+Easy File Organizer (Cross-Platform Security-Hardened Edition)
+==============================================================
+A modern, compact, beginner-friendly desktop utility for Windows, macOS, and Linux
+that sorts loose files into neat category subfolders in 3 simple steps, backed by
+enterprise-grade defensive programming and OS-aware security controls.
 
-Security Controls Implemented:
-1. Critical System Path Blacklisting (blocks root drives, Windows, Program Files,
-   Users root, AppData, Start Menu, Startup, Recycle Bin, etc.).
-2. Path Traversal, Containment & Filename Sanitization (enforces os.path.commonpath
-   containment, blocks Alternate Data Streams ':', strips Unicode RLO/Bidi spoofing
-   characters, and neutralizes Windows Reserved Device Names like CON, PRN, AUX, NUL).
-3. Symlink, NTFS Junction Point & Reparse Point Defense (never follows or moves
-   symbolic links or NTFS junctions; blocks symlinked destination folders).
-4. TOCTOU Protection, Non-Destructive Move & Post-Move Size/Inode Verification
-   (strict zero-deletion guarantee: never deletes or overwrites any file).
-5. Privilege & Exception Hardening (detects elevated Administrator privileges via
-   ctypes.windll.shell32.IsUserAnAdmin() and isolates per-file exceptions).
+Cross-Platform & Security Controls Implemented:
+1. Dynamic OS Detection & Path Resolution:
+   - Uses `platform.system()` to adapt to Windows, macOS ("Darwin"), and Linux.
+   - Resolves Downloads, Desktop, and Documents across Windows (including OneDrive
+     redirection), macOS (`~/Downloads`, etc.), and Linux (`XDG_CONFIG_HOME` /
+     `~/.config/user-dirs.dirs` with `~/Downloads` fallback).
+2. OS-Specific Blacklisted System Directories:
+   - Windows: Blocks root drives (`C:\\`, `D:\\`), `C:\\Windows`, `System32`, `SysWOW64`,
+     `WinSxS`, `Program Files`, `Program Files (x86)`, `C:\\Users`, and root `AppData`.
+   - macOS: Blocks `/`, `/System`, `/Library`, `/Applications`, `/private`, `/usr`,
+     `/bin`, `/sbin`, `/Users`, and user `~/Library`.
+   - Linux: Blocks `/`, `/boot`, `/etc`, `/sys`, `/proc`, `/dev`, `/usr`, `/bin`,
+     `/sbin`, `/var`, `/root`, and `/home`.
+   - All OSes: Blocks organizing the root user home directory itself (`Path.home()`).
+3. Platform-Specific System & Hidden File Filtering:
+   - Cross-platform: Dotfiles (`.`), Office lock files (`~$*`), incomplete downloads.
+   - Windows: `desktop.ini`, `thumbs.db`, hidden/system file attributes.
+   - macOS: `.DS_Store`, AppleDouble (`._*`), `.localized`, `.Trashes`, `.Spotlight-V100`,
+     `Icon\\r`, and BSD `UF_HIDDEN` flag.
+   - Linux: Editor swap/backup files (`*.swp`, `*.swo`, `*~`, `#*#`), `.directory`.
+4. Cross-Platform Privilege & Non-Destructive File Permission Handling:
+   - Detects Administrator (`ctypes.windll.shell32.IsUserAnAdmin()`) on Windows and
+     `root` (`os.geteuid() == 0`) on macOS/Linux.
+   - Checks POSIX write permissions (`os.access(..., os.W_OK)`) before moving.
+   - Enforces path containment, symlink/junction defense, TOCTOU inode/size checks,
+     and a strict zero-deletion guarantee.
 
-Uses only the Python standard library: os, shutil, ctypes, pathlib, stat, tkinter, typing.
+Uses only the Python standard library: ctypes, os, pathlib, platform, shutil, stat, tkinter, typing.
 """
 
 import ctypes
 import os
+from pathlib import Path
+import platform
 import shutil
 import stat
-from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Dict, List, Optional, Set, Tuple
 
 
 # ==============================================================================
-# 1. FILE CATEGORIES, ICONS & LABELS
+# 1. OPERATING SYSTEM DETECTION & NATIVE TYPOGRAPHY
+# ==============================================================================
+
+# Detect host operating system: "Windows", "Darwin" (macOS), or "Linux"
+CURRENT_OS: str = platform.system()
+
+# Select clean native UI font per platform
+if CURRENT_OS == "Windows":
+    UI_FONT: str = "Segoe UI"
+elif CURRENT_OS == "Darwin":
+    UI_FONT = "Helvetica Neue"
+else:
+    UI_FONT = "DejaVu Sans"
+
+
+# ==============================================================================
+# 2. FILE CATEGORIES, ICONS & LABELS (CROSS-PLATFORM)
 # ==============================================================================
 
 CATEGORIES: Dict[str, Set[str]] = {
     "Photos & Images": {
-        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico", ".heic"
+        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico", ".heic", ".tiff"
     },
     "Documents": {
-        ".pdf", ".docx", ".doc", ".txt", ".xlsx", ".xls", ".pptx", ".ppt", ".csv", ".rtf"
+        ".pdf", ".docx", ".doc", ".txt", ".xlsx", ".xls", ".pptx", ".ppt",
+        ".csv", ".rtf", ".odt", ".ods", ".odp", ".md", ".pages", ".numbers", ".key"
     },
     "Videos": {
-        ".mp4", ".mkv", ".mov", ".avi", ".wmv", ".webm"
+        ".mp4", ".mkv", ".mov", ".avi", ".wmv", ".webm", ".m4v", ".flv"
     },
     "Music & Audio": {
-        ".mp3", ".wav", ".aac", ".flac", ".m4a", ".ogg", ".wma"
+        ".mp3", ".wav", ".aac", ".flac", ".m4a", ".ogg", ".wma", ".opus", ".aiff"
     },
     "Zip Files": {
-        ".zip", ".rar", ".7z", ".tar", ".gz", ".iso"
+        ".zip", ".rar", ".7z", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".iso"
     },
     "Installers": {
-        ".exe", ".msi"
+        ".exe", ".msi", ".dmg", ".pkg", ".deb", ".rpm", ".appimage"
     },
     "Code & Scripts": {
-        ".py", ".js", ".html", ".css", ".json", ".bat", ".ps1"
+        ".py", ".js", ".ts", ".html", ".css", ".json", ".bat", ".ps1",
+        ".sh", ".zsh", ".bash", ".yaml", ".yml", ".xml", ".sql"
     },
 }
 
@@ -84,16 +117,15 @@ EXTENSION_TO_CATEGORY: Dict[str, str] = {
 
 
 # ==============================================================================
-# 2. SECURITY CONSTANTS & BLACKLIST DEFINITIONS
+# 3. SECURITY & METADATA FILTER CONSTANTS
 # ==============================================================================
 
-# Exact security modal message required when blocking protected directories
 PROTECTED_FOLDER_MESSAGE: str = (
     "Protected System Folder: Organizing this directory is blocked to protect your operating system."
 )
 
-# Hidden Windows system metadata files and incomplete download extensions
-IGNORED_FILENAMES: Set[str] = {
+# Cross-platform + OS-specific hidden/system filenames (lowercase)
+WINDOWS_IGNORED_FILENAMES: Set[str] = {
     "desktop.ini",
     "thumbs.db",
     "ehthumbs.db",
@@ -106,23 +138,50 @@ IGNORED_FILENAMES: Set[str] = {
     "swapfile.sys",
 }
 
+MACOS_IGNORED_FILENAMES: Set[str] = {
+    ".ds_store",
+    ".localized",
+    ".trashes",
+    ".spotlight-v100",
+    ".fseventsd",
+    ".temporaryitems",
+    ".volumeicon.icns",
+    "icon\r",
+}
+
+LINUX_IGNORED_FILENAMES: Set[str] = {
+    ".directory",
+    ".trash",
+}
+
+ALL_IGNORED_FILENAMES: Set[str] = (
+    WINDOWS_IGNORED_FILENAMES | MACOS_IGNORED_FILENAMES | LINUX_IGNORED_FILENAMES
+)
+
+# Incomplete download artifacts & OS shortcut/swap extensions
 IGNORED_TEMP_EXTENSIONS: Set[str] = {
     ".tmp",
     ".temp",
     ".crdownload",
     ".part",
     ".partial",
+    ".download",
+    ".swp",
+    ".swo",
+    ".swn",
     ".lnk",
     ".url",
+    ".webloc",
+    ".desktop",
 }
 
-# Windows File Attribute bitmasks (from Win32 API / os.lstat().st_file_attributes)
-FILE_ATTRIBUTE_READONLY: int = 0x0001
+# Windows File Attribute bitmasks & macOS BSD flags
 FILE_ATTRIBUTE_HIDDEN: int = 0x0002
 FILE_ATTRIBUTE_SYSTEM: int = 0x0004
-FILE_ATTRIBUTE_REPARSE_POINT: int = 0x0400  # Symlinks, NTFS Junctions, Mount Points
+FILE_ATTRIBUTE_REPARSE_POINT: int = 0x0400
+UF_HIDDEN: int = 0x8000  # macOS / BSD hidden file flag in st_flags
 
-# Windows Reserved Device Names (blocked across all extensions like CON.txt or LPT1.doc)
+# Windows Reserved Device Names (guarded on all platforms for cross-platform safety)
 WINDOWS_RESERVED_NAMES: Set[str] = {
     "CON", "PRN", "AUX", "NUL",
     "CONIN$", "CONOUT$", "CLOCK$",
@@ -132,40 +191,120 @@ WINDOWS_RESERVED_NAMES: Set[str] = {
 
 # Unicode Bidirectional / Spoofing characters used to disguise extensions (e.g., RLO \u202E)
 UNICODE_SPOOFING_CHARS: Set[str] = {
-    "\u202e",  # Right-to-Left Override (RLO) - classic .exe -> .pdf disguise
-    "\u202d",  # Left-to-Right Override (LRO)
-    "\u202a",  # Left-to-Right Embedding (LRE)
-    "\u202b",  # Right-to-Left Embedding (RLE)
-    "\u202c",  # Pop Directional Formatting (PDF)
-    "\u2066",  # Left-to-Right Isolate (LRI)
-    "\u2067",  # Right-to-Left Isolate (RLI)
-    "\u2068",  # First Strong Isolate (FSI)
-    "\u2069",  # Pop Directional Isolate (PDI)
-    "\u200e",  # Left-to-Right Mark (LRM)
-    "\u200f",  # Right-to-Left Mark (RLM)
-    "\u200b",  # Zero-Width Space (ZWSP)
-    "\u200c",  # Zero-Width Non-Joiner
-    "\u200d",  # Zero-Width Joiner
-    "\ufeff",  # Zero-Width No-Break Space (BOM)
+    "\u202e", "\u202d", "\u202a", "\u202b", "\u202c",
+    "\u2066", "\u2067", "\u2068", "\u2069",
+    "\u200e", "\u200f", "\u200b", "\u200c", "\u200d", "\ufeff",
 }
 
-# Characters forbidden in standard Windows filenames (':' also indicates NTFS ADS)
-WINDOWS_FORBIDDEN_CHARS: Set[str] = set('<>:"/\\|?*')
+FORBIDDEN_FILENAME_CHARS: Set[str] = set('<>:"/\\|?*')
 
 
 # ==============================================================================
-# 3. ENTERPRISE DEFENSIVE SECURITY CONTROLS
+# 4. CROSS-PLATFORM FOLDER RESOLUTION (WINDOWS / MACOS / LINUX XDG)
 # ==============================================================================
 
-def is_running_as_admin() -> bool:
+def _parse_linux_xdg_user_dirs(home: Path) -> Dict[str, Path]:
     """
-    Control 5 (Principle of Least Privilege):
-    Detect whether the current process is running with elevated Windows
-    Administrator privileges via ctypes.windll.shell32.IsUserAnAdmin().
+    Parse Linux XDG user directories from `$XDG_CONFIG_HOME/user-dirs.dirs`
+    (defaulting to `~/.config/user-dirs.dirs`).
+    Supports keys: XDG_DOWNLOAD_DIR, XDG_DESKTOP_DIR, XDG_DOCUMENTS_DIR.
+    """
+    xdg_config_home = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    config_dir = Path(xdg_config_home) if xdg_config_home else (home / ".config")
+    user_dirs_file = config_dir / "user-dirs.dirs"
+
+    key_map = {
+        "XDG_DOWNLOAD_DIR": "Downloads",
+        "XDG_DESKTOP_DIR": "Desktop",
+        "XDG_DOCUMENTS_DIR": "Documents",
+    }
+    resolved_dirs: Dict[str, Path] = {}
+
+    if not user_dirs_file.is_file():
+        return resolved_dirs
+
+    try:
+        content = user_dirs_file.read_text(encoding="utf-8", errors="ignore")
+        for raw_line in content.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            key = key.strip()
+            if key not in key_map:
+                continue
+
+            # Strip surrounding quotes and expand $HOME / ${HOME}
+            cleaned_val = val.strip().strip('"').strip("'")
+            cleaned_val = cleaned_val.replace("${HOME}", str(home)).replace(
+                "$HOME", str(home)
+            )
+            candidate = Path(cleaned_val)
+            if not candidate.is_absolute():
+                candidate = home / candidate
+            resolved_dirs[key_map[key]] = candidate
+    except OSError:
+        pass
+
+    return resolved_dirs
+
+
+def resolve_user_folder(folder_name: str, current_os: str = CURRENT_OS) -> Path:
+    """
+    Specification 1 (Cross-Platform Quick Folders):
+    Reliably resolve 'Downloads', 'Desktop', and 'Documents' across:
+    - Windows: Standard home folder with OneDrive redirection fallback.
+    - macOS ("Darwin"): `Path.home() / folder_name`.
+    - Linux ("Linux"): `XDG_CONFIG_HOME/user-dirs.dirs` (`XDG_DOWNLOAD_DIR`, etc.)
+      with fallback to `Path.home() / folder_name`.
+    """
+    home = Path.home()
+    direct_path = home / folder_name
+
+    if current_os == "Windows":
+        if direct_path.exists():
+            return direct_path
+        # Check environment OneDrive variables and ~/OneDrive fallback
+        for env_key in ("OneDriveConsumer", "OneDrive", "OneDriveCommercial"):
+            env_val = os.environ.get(env_key, "").strip()
+            if env_val:
+                od_candidate = Path(env_val) / folder_name
+                if od_candidate.exists():
+                    return od_candidate
+        onedrive_path = home / "OneDrive" / folder_name
+        if onedrive_path.exists():
+            return onedrive_path
+        return direct_path
+
+    if current_os == "Linux":
+        xdg_dirs = _parse_linux_xdg_user_dirs(home)
+        if folder_name in xdg_dirs:
+            xdg_candidate = xdg_dirs[folder_name]
+            if xdg_candidate.exists():
+                return xdg_candidate
+        return direct_path
+
+    # macOS ("Darwin") and other POSIX platforms
+    return direct_path
+
+
+# ==============================================================================
+# 5. ENTERPRISE CROSS-PLATFORM SECURITY CONTROLS
+# ==============================================================================
+
+def is_running_with_elevated_privileges(current_os: str = CURRENT_OS) -> bool:
+    """
+    Specification 4 (Root / Administrator Detection):
+    - On Windows: Check via `ctypes.windll.shell32.IsUserAnAdmin()`.
+    - On macOS / Linux: Check via `os.geteuid() == 0`.
     """
     try:
-        if hasattr(ctypes, "windll") and hasattr(ctypes.windll, "shell32"):
-            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        if current_os == "Windows":
+            if hasattr(ctypes, "windll") and hasattr(ctypes.windll, "shell32"):
+                return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        else:
+            if hasattr(os, "geteuid"):
+                return os.geteuid() == 0
     except (OSError, AttributeError, ValueError):
         pass
     return False
@@ -173,7 +312,7 @@ def is_running_as_admin() -> bool:
 
 def is_symlink_or_junction(path: Path) -> bool:
     """
-    Control 3 (Symlink, Junction Point & Reparse Point Defense):
+    Control 3 (Symlink, NTFS Junction Point & Reparse Point Defense):
     Return True if `path` is a symbolic link, NTFS junction point, mount point,
     or carries the Windows FILE_ATTRIBUTE_REPARSE_POINT bit.
     Never follows the link target (uses os.lstat).
@@ -190,137 +329,225 @@ def is_symlink_or_junction(path: Path) -> bool:
         if stat.S_ISLNK(lstat_info.st_mode):
             return True
     except (OSError, ValueError):
-        # Fail closed: if we cannot verify link status safely, treat as unsafe
         return True
     return False
 
 
-def is_protected_system_path(target_path: Path) -> Tuple[bool, str]:
-    """
-    Control 1 (Critical System Path Blacklisting / Anti-Bricking Protection):
-    Hard-block root drives, Windows system directories, Program Files, Users root,
-    AppData, Start Menu, Startup, Recovery, and Recycle Bin.
-    """
-    try:
-        # Reject immediately if the selected directory itself is a symlink or junction
-        if is_symlink_or_junction(target_path):
-            return True, "Symbolic links and NTFS junction directories are blocked."
+def _normalize_path_str(path_str: str, current_os: str) -> str:
+    """Normalize a path string for comparison on the given OS."""
+    cleaned = path_str.strip()
+    if current_os == "Windows":
+        cleaned = cleaned.replace("/", "\\")
+        if len(cleaned) > 3:
+            cleaned = cleaned.rstrip("\\")
+        return cleaned.lower()
+    else:
+        cleaned = cleaned.replace("\\", "/")
+        if len(cleaned) > 1:
+            cleaned = cleaned.rstrip("/")
+        return cleaned
 
-        resolved = target_path.resolve()
+
+def _is_subpath_or_equal(target_norm: str, protected_norm: str, sep: str) -> bool:
+    """Return True if `target_norm` equals `protected_norm` or is inside it."""
+    if target_norm == protected_norm:
+        return True
+    return target_norm.startswith(protected_norm.rstrip(sep) + sep)
+
+
+def is_protected_system_path(
+    target_path: Path, current_os: str = CURRENT_OS
+) -> Tuple[bool, str]:
+    """
+    Specification 2 (OS-Specific Blacklisted System Directories):
+    Dynamically enforce system folder blacklists for Windows, macOS, and Linux,
+    and prevent organizing the root user home directory on all platforms.
+    """
+    raw_str = str(target_path).strip()
+    if not raw_str:
+        return True, "Empty directory path."
+
+    # If the path exists on the current host, reject symlinks/junctions immediately
+    try:
+        if target_path.exists() and is_symlink_or_junction(target_path):
+            return True, "Symbolic links and junction directories are blocked."
+        resolved = target_path.resolve() if target_path.exists() else target_path
     except (OSError, ValueError, RuntimeError):
         return True, "Could not safely resolve directory path."
 
-    norm_target = os.path.normcase(os.path.normpath(str(resolved)))
+    norm_target = _normalize_path_str(str(resolved), current_os)
 
-    # 1. Block root drives (e.g., C:\, D:\, \\server\share\)
-    if resolved.parent == resolved or norm_target.rstrip("\\/") == os.path.normcase(
-        resolved.anchor.rstrip("\\/")
+    # 1. Block root directories on all platforms ('/' on POSIX, 'C:\', 'D:\' on Windows)
+    if norm_target in ("/", "\\") or (
+        len(norm_target) in (2, 3)
+        and norm_target[1:2] == ":"
+        and norm_target[2:] in ("", "\\", "/")
     ):
-        return True, "Root drive directories cannot be organized."
+        return True, "Root filesystem directories cannot be organized."
 
-    # 2. Build dynamic + static sets of protected trees and exact paths
-    drive_anchor = resolved.anchor or "C:\\"
+    if resolved.parent == resolved:
+        return True, "Root filesystem directories cannot be organized."
 
-    # Directories where the folder ITSELF and ALL SUBFOLDERS are strictly forbidden
-    protected_trees: Set[str] = set()
-    tree_candidates = [
-        os.environ.get("SystemRoot", os.path.join(drive_anchor, "Windows")),
-        os.environ.get("WINDIR", os.path.join(drive_anchor, "Windows")),
-        os.path.join(drive_anchor, "Windows"),
-        os.path.join(drive_anchor, "Windows", "System32"),
-        os.path.join(drive_anchor, "Windows", "SysWOW64"),
-        os.path.join(drive_anchor, "Windows", "WinSxS"),
-        os.environ.get("ProgramFiles", os.path.join(drive_anchor, "Program Files")),
-        os.environ.get(
-            "ProgramFiles(x86)", os.path.join(drive_anchor, "Program Files (x86)")
-        ),
-        os.environ.get("ProgramW6432", os.path.join(drive_anchor, "Program Files")),
-        os.environ.get("ProgramData", os.path.join(drive_anchor, "ProgramData")),
-        os.path.join(drive_anchor, "Program Files"),
-        os.path.join(drive_anchor, "Program Files (x86)"),
-        os.path.join(drive_anchor, "ProgramData"),
-        os.path.join(drive_anchor, "Recovery"),
-        os.path.join(drive_anchor, "$Recycle.Bin"),
-        os.path.join(drive_anchor, "System Volume Information"),
-    ]
-
-    # Add user Start Menu and Startup trees
+    # 2. Prevent organizing the root user home directory itself on all platforms
+    #    (e.g., C:\Users\username, /Users/username, /home/username)
     try:
-        home = Path.home().resolve()
-        tree_candidates.extend(
-            [
-                str(
-                    home
-                    / "AppData"
-                    / "Roaming"
-                    / "Microsoft"
-                    / "Windows"
-                    / "Start Menu"
-                ),
-                str(
-                    Path(drive_anchor)
-                    / "ProgramData"
-                    / "Microsoft"
-                    / "Windows"
-                    / "Start Menu"
-                ),
-            ]
-        )
+        home = Path.home()
+        norm_home = _normalize_path_str(str(home), current_os)
+        norm_home_parent = _normalize_path_str(str(home.parent), current_os)
+        if norm_target in (norm_home, norm_home_parent):
+            return True, "Organizing the root user directory is blocked."
     except (OSError, ValueError):
         home = None
 
-    for candidate in tree_candidates:
-        if candidate:
-            protected_trees.add(os.path.normcase(os.path.normpath(candidate)))
+    # 3. OS-Specific Blacklists
+    if current_os == "Windows":
+        drive_anchor = resolved.anchor or "C:\\"
+        if not drive_anchor.endswith("\\"):
+            drive_anchor = "C:\\"
 
-    for protected_root in protected_trees:
-        try:
-            common = os.path.commonpath([norm_target, protected_root])
-            if common == protected_root:
-                return True, "Protected Windows or application directory."
-        except ValueError:
-            continue
+        win_trees = [
+            os.environ.get("SystemRoot", os.path.join(drive_anchor, "Windows")),
+            os.environ.get("WINDIR", os.path.join(drive_anchor, "Windows")),
+            os.path.join(drive_anchor, "Windows"),
+            os.path.join(drive_anchor, "Windows", "System32"),
+            os.path.join(drive_anchor, "Windows", "SysWOW64"),
+            os.path.join(drive_anchor, "Windows", "WinSxS"),
+            os.environ.get("ProgramFiles", os.path.join(drive_anchor, "Program Files")),
+            os.environ.get(
+                "ProgramFiles(x86)", os.path.join(drive_anchor, "Program Files (x86)")
+            ),
+            os.environ.get("ProgramW6432", os.path.join(drive_anchor, "Program Files")),
+            os.environ.get("ProgramData", os.path.join(drive_anchor, "ProgramData")),
+            os.path.join(drive_anchor, "Program Files"),
+            os.path.join(drive_anchor, "Program Files (x86)"),
+            os.path.join(drive_anchor, "ProgramData"),
+            os.path.join(drive_anchor, "Recovery"),
+            os.path.join(drive_anchor, "$Recycle.Bin"),
+            os.path.join(drive_anchor, "System Volume Information"),
+        ]
+        if home is not None:
+            win_trees.extend(
+                [
+                    str(
+                        home
+                        / "AppData"
+                        / "Roaming"
+                        / "Microsoft"
+                        / "Windows"
+                        / "Start Menu"
+                    ),
+                    str(
+                        Path(drive_anchor)
+                        / "ProgramData"
+                        / "Microsoft"
+                        / "Windows"
+                        / "Start Menu"
+                    ),
+                ]
+            )
 
-    # 3. Block exact parent roots (C:\Users, user profile root, and the roots of AppData)
-    exact_blocked: Set[str] = {
-        os.path.normcase(os.path.normpath(os.path.join(drive_anchor, "Users"))),
-    }
-    for env_key in ("APPDATA", "LOCALAPPDATA", "TEMP", "TMP"):
-        env_val = os.environ.get(env_key, "")
-        if env_val:
-            exact_blocked.add(os.path.normcase(os.path.normpath(env_val)))
+        for tree in win_trees:
+            if tree and _is_subpath_or_equal(
+                norm_target, _normalize_path_str(tree, "Windows"), "\\"
+            ):
+                return True, "Protected Windows system or program directory."
 
-    if home is not None:
-        for exact_path in (
-            home,
-            home.parent,
-            home / "AppData",
-            home / "AppData" / "Local",
-            home / "AppData" / "Roaming",
-            home / "AppData" / "LocalLow",
-        ):
-            exact_blocked.add(os.path.normcase(os.path.normpath(str(exact_path))))
+        win_exact = {
+            _normalize_path_str(os.path.join(drive_anchor, "Users"), "Windows"),
+        }
+        for env_key in ("APPDATA", "LOCALAPPDATA", "TEMP", "TMP"):
+            env_val = os.environ.get(env_key, "")
+            if env_val:
+                win_exact.add(_normalize_path_str(env_val, "Windows"))
 
-    if norm_target in exact_blocked:
-        return True, "Protected user or application data root directory."
+        if home is not None:
+            for p in (
+                home / "AppData",
+                home / "AppData" / "Local",
+                home / "AppData" / "Roaming",
+                home / "AppData" / "LocalLow",
+            ):
+                win_exact.add(_normalize_path_str(str(p), "Windows"))
 
-    # 4. Block any path component matching critical system or startup folder names
-    protected_component_names = {
-        "windows",
-        "system32",
-        "syswow64",
-        "winsxs",
-        "program files",
-        "program files (x86)",
-        "programdata",
-        "start menu",
-        "startup",
-        "$recycle.bin",
-        "system volume information",
-    }
-    for part in resolved.parts:
-        if part.lower().strip("\\/") in protected_component_names:
-            return True, f"Protected folder component '{part}' detected."
+        if norm_target in win_exact:
+            return True, "Protected Windows user or AppData root directory."
+
+        win_components = {
+            "windows",
+            "system32",
+            "syswow64",
+            "winsxs",
+            "program files",
+            "program files (x86)",
+            "programdata",
+            "start menu",
+            "startup",
+            "$recycle.bin",
+            "system volume information",
+        }
+        for part in norm_target.split("\\"):
+            if part in win_components:
+                return True, f"Protected Windows component '{part}'."
+
+    elif current_os == "Darwin":
+        # macOS Blacklist: /, /System, /Library, /Applications, /private, /usr, /bin, /sbin, ~/Library
+        mac_trees = [
+            "/System",
+            "/Library",
+            "/Applications",
+            "/private",
+            "/usr",
+            "/bin",
+            "/sbin",
+            "/dev",
+            "/etc",
+            "/var",
+            "/Volumes",
+            "/cores",
+        ]
+        if home is not None:
+            mac_trees.append(str(home / "Library").replace("\\", "/"))
+
+        for tree in mac_trees:
+            norm_tree = _normalize_path_str(tree, "Darwin")
+            if _is_subpath_or_equal(norm_target, norm_tree, "/"):
+                return True, f"Protected macOS directory '{tree}'."
+
+        # Also block /Users root and any `/Users/<user>/Library` or `/Users/<user>`
+        parts = [p for p in norm_target.split("/") if p]
+        if parts == ["Users"] or (len(parts) == 2 and parts[0] == "Users"):
+            return True, "Protected macOS /Users root directory."
+        if len(parts) >= 3 and parts[0] == "Users" and parts[2] == "Library":
+            return True, "Protected macOS ~/Library directory."
+
+    else:
+        # Linux / POSIX Blacklist: /, /boot, /etc, /sys, /proc, /dev, /usr, /bin, /sbin, /var, /root
+        linux_trees = [
+            "/boot",
+            "/etc",
+            "/sys",
+            "/proc",
+            "/dev",
+            "/usr",
+            "/bin",
+            "/sbin",
+            "/var",
+            "/root",
+            "/lib",
+            "/lib64",
+            "/run",
+            "/opt",
+            "/srv",
+            "/snap",
+        ]
+        for tree in linux_trees:
+            norm_tree = _normalize_path_str(tree, "Linux")
+            if _is_subpath_or_equal(norm_target, norm_tree, "/"):
+                return True, f"Protected Linux system directory '{tree}'."
+
+        parts = [p for p in norm_target.split("/") if p]
+        if parts == ["home"] or (len(parts) == 2 and parts[0] == "home"):
+            return True, "Protected Linux /home user root directory."
 
     return False, ""
 
@@ -329,14 +556,12 @@ def is_reserved_windows_name(filename: str) -> bool:
     """
     Control 2 (Windows Reserved Device Name Defense):
     Check if a filename matches a reserved MS-DOS/Windows device name such as
-    CON, PRN, AUX, NUL, COM1-COM9, LPT1-LPT9 (even when followed by extensions
-    like 'CON.txt' or 'NUL.tar.gz').
+    CON, PRN, AUX, NUL, COM1-COM9, LPT1-LPT9 (with or without extensions).
     """
     trimmed = filename.strip(" .")
     if not trimmed:
         return True
 
-    # Windows checks both the stem and the token before the very first dot
     first_token = trimmed.split(".")[0].upper()
     stem_token = Path(trimmed).stem.upper()
     return first_token in WINDOWS_RESERVED_NAMES or stem_token in WINDOWS_RESERVED_NAMES
@@ -345,22 +570,17 @@ def is_reserved_windows_name(filename: str) -> bool:
 def inspect_and_sanitize_filename(raw_name: str) -> Tuple[bool, str, str]:
     """
     Control 2 (Path Traversal, ADS, Reserved Names & Unicode Spoofing Defense):
-    Inspect a raw filename and return:
-        (is_safe_to_process, sanitized_filename, block_reason)
-
     - Blocks Alternate Data Streams (':' in filename) and path traversal ('..', '/', '\\').
     - Strips Unicode Bidirectional Override characters (such as RLO \\u202E) and
       ASCII control characters so disguised executables are neutralized.
-    - Blocks or rejects Windows Reserved Device Names (CON, PRN, AUX, NUL, COM1..9, LPT1..9).
+    - Blocks Windows Reserved Device Names (CON, PRN, AUX, NUL, COM1..9, LPT1..9).
     """
     if not raw_name:
         return False, "", "Empty filename"
 
-    # 1. Block NTFS Alternate Data Streams (e.g. malicious.txt:hidden.exe)
     if ":" in raw_name:
-        return False, "", "Blocked Alternate Data Stream (ADS) in filename"
+        return False, "", "Blocked Alternate Data Stream (ADS) or colon in filename"
 
-    # 2. Block Path Traversal sequences or embedded directory separators
     if (
         "/" in raw_name
         or "\\" in raw_name
@@ -369,7 +589,6 @@ def inspect_and_sanitize_filename(raw_name: str) -> Tuple[bool, str, str]:
     ):
         return False, "", "Blocked path traversal sequence in filename"
 
-    # 3. Strip Unicode Bidi Spoofing characters (\u202E, etc.) and C0/C1 control chars
     cleaned_chars: List[str] = []
     for ch in raw_name:
         code = ord(ch)
@@ -377,18 +596,16 @@ def inspect_and_sanitize_filename(raw_name: str) -> Tuple[bool, str, str]:
             continue
         if code < 32 or (127 <= code <= 159):
             continue
-        if ch in WINDOWS_FORBIDDEN_CHARS:
+        if ch in FORBIDDEN_FILENAME_CHARS:
             continue
         cleaned_chars.append(ch)
 
-    # Windows strips trailing spaces and dots when resolving files; normalize safely
     sanitized = "".join(cleaned_chars).strip(" .")
     if not sanitized or sanitized in (".", ".."):
         return False, "", "Filename unsafe after stripping control characters"
 
-    # 4. Block Windows Reserved Device Names (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
     if is_reserved_windows_name(raw_name) or is_reserved_windows_name(sanitized):
-        return False, "", f"Blocked Windows reserved device name '{raw_name}'"
+        return False, "", f"Blocked reserved device name '{raw_name}'"
 
     return True, sanitized, ""
 
@@ -417,13 +634,11 @@ def verify_path_containment(base_dir: Path, category_dir: Path, dest_path: Path)
         norm_cat = os.path.normcase(os.path.normpath(str(resolved_category)))
         norm_dest = os.path.normcase(os.path.normpath(str(resolved_dest)))
 
-        # Verify commonpath containment
         if os.path.commonpath([norm_base, norm_cat]) != norm_base:
             return False
         if os.path.commonpath([norm_base, norm_dest]) != norm_base:
             return False
 
-        # Verify strict single-level hierarchy: base_dir -> Category -> filename
         if resolved_category.parent != resolved_base:
             return False
         if resolved_dest.parent != resolved_category:
@@ -437,54 +652,73 @@ def verify_path_containment(base_dir: Path, category_dir: Path, dest_path: Path)
 def _disallow_copy_fallback(_src: str, _dst: str) -> None:
     """
     Control 4 (Non-Destructive Atomic Move Helper):
-    Passed as `copy_function` to `shutil.move`.
-    Because files are sorted into a subfolder on the same volume, `shutil.move`
-    uses atomic `os.rename`. If `os.rename` fails (e.g. file locked by Excel),
-    blocking the copy fallback prevents creating partial duplicate copies and
-    guarantees no file deletion is ever needed.
+    Prevents `shutil.move` from falling back to non-atomic copy+delete when a
+    file is locked, guaranteeing zero partial copies and zero file deletions.
     """
     raise PermissionError("Atomic rename blocked because the file is currently in use.")
 
 
 def atomic_verified_move(
-    source_path: Path, dest_path: Path, base_dir: Path, category_dir: Path
+    source_path: Path,
+    dest_path: Path,
+    base_dir: Path,
+    category_dir: Path,
+    current_os: str = CURRENT_OS,
 ) -> Tuple[bool, str]:
     """
-    Control 4 (TOCTOU Protection, Non-Destructive Move & Integrity Verification):
-    1. Re-verifies path containment and ensures neither source nor destination
-       is a symlink or junction immediately prior to moving.
-    2. Captures pre-move file size and inode, and opens the file handle to verify
-       it has not been swapped or locked (TOCTOU defense).
-    3. Ensures destination does not exist (never overwrites).
-    4. Moves the file atomically and verifies post-move existence and exact byte size.
+    Specification 4 & Control 4 (Cross-Platform Permission Check, TOCTOU & Integrity):
+    1. Verifies strict path containment and non-symlink status.
+    2. On POSIX (macOS/Linux), checks write permissions via `os.access(..., os.W_OK)`.
+    3. Captures pre-move `st_size` and `st_ino` via `os.lstat()`.
+    4. Executes an atomic, non-overwriting move (`shutil.move` with copy fallback disabled).
+    5. Verifies post-move destination existence, regular file mode, size, and inode.
     """
-    # 1. Verify strict containment inside the target folder
     if not verify_path_containment(base_dir, category_dir, dest_path):
-        return False, f"Blocked '{source_path.name}': Destination failed path containment check."
+        return (
+            False,
+            f"Blocked '{source_path.name}': Destination failed path containment check.",
+        )
 
-    # 2. Reject symlinks or NTFS junctions at Time-of-Use
     if is_symlink_or_junction(source_path):
-        return False, f"Skipped '{source_path.name}' because symbolic links are not moved."
+        return (
+            False,
+            f"Skipped '{source_path.name}' because symbolic links are not moved.",
+        )
 
     try:
-        # 3. Capture pre-move metadata via lstat (does not follow symlinks or trigger AV open locks)
+        # Specification 4: On POSIX (macOS/Linux), verify write permissions before moving
+        if current_os != "Windows":
+            if not os.access(source_path, os.W_OK) or not os.access(
+                source_path.parent, os.W_OK
+            ):
+                return (
+                    False,
+                    f"Skipped {source_path.name} because you do not have write permission for it.",
+                )
+
         pre_stat = os.lstat(source_path)
         if not stat.S_ISREG(pre_stat.st_mode):
-            return False, f"Skipped '{source_path.name}' because it is not a regular file."
+            return (
+                False,
+                f"Skipped '{source_path.name}' because it is not a regular file.",
+            )
 
         expected_size = pre_stat.st_size
         expected_ino = pre_stat.st_ino
 
-        # 4. Create destination category folder safely and verify it isn't a junction
         category_dir.mkdir(exist_ok=True)
         if is_symlink_or_junction(category_dir):
-            return False, f"Blocked '{source_path.name}': Category folder is a symlink or junction."
+            return (
+                False,
+                f"Blocked '{source_path.name}': Category folder is a symlink or junction.",
+            )
 
-        # 5. Re-verify source immediately before move (TOCTOU check: inode, size, and non-symlink)
+        # TOCTOU check immediately before moving
         confirm_stat = os.lstat(source_path)
+        confirm_attrs = getattr(confirm_stat, "st_file_attributes", 0)
         if (
             not stat.S_ISREG(confirm_stat.st_mode)
-            or (confirm_stat.st_file_attributes & FILE_ATTRIBUTE_REPARSE_POINT)
+            or (confirm_attrs & FILE_ATTRIBUTE_REPARSE_POINT)
             or confirm_stat.st_size != expected_size
             or (expected_ino != 0 and confirm_stat.st_ino != expected_ino)
         ):
@@ -493,23 +727,28 @@ def atomic_verified_move(
                 f"Skipped '{source_path.name}' because the file changed during scanning.",
             )
 
-        # 6. Never overwrite existing files
         if dest_path.exists():
-            return False, f"Skipped '{source_path.name}' to avoid overwriting an existing file."
+            return (
+                False,
+                f"Skipped '{source_path.name}' to avoid overwriting an existing file.",
+            )
 
-        # 7. Execute atomic move without copy/delete fallback
         shutil.move(
             str(source_path),
             str(dest_path),
             copy_function=_disallow_copy_fallback,
         )
 
-        # 8. Post-move integrity verification: confirm destination exists, size & inode match
+        # Post-move integrity verification
         post_stat = os.lstat(dest_path)
         if (
             not stat.S_ISREG(post_stat.st_mode)
             or post_stat.st_size != expected_size
-            or (expected_ino != 0 and post_stat.st_ino != 0 and post_stat.st_ino != expected_ino)
+            or (
+                expected_ino != 0
+                and post_stat.st_ino != 0
+                and post_stat.st_ino != expected_ino
+            )
         ):
             return (
                 False,
@@ -521,7 +760,7 @@ def atomic_verified_move(
     except PermissionError:
         return (
             False,
-            f"Skipped {source_path.name} because it is currently open in another app.",
+            f"Skipped {source_path.name} because it is currently open or permission was denied.",
         )
     except FileExistsError:
         return (
@@ -531,47 +770,84 @@ def atomic_verified_move(
     except (OSError, ValueError):
         return (
             False,
-            f"Skipped {source_path.name} because Windows is currently using or protecting it.",
+            f"Skipped {source_path.name} because the operating system is currently using or protecting it.",
         )
 
 
 # ==============================================================================
-# 4. STANDARD FILTERING & CATEGORIZATION HELPERS
+# 6. PLATFORM-SPECIFIC SYSTEM & HIDDEN FILE FILTERING
 # ==============================================================================
 
-def should_ignore_file(file_path: Path, script_path: Path) -> bool:
+def should_ignore_filename_by_rules(
+    filename: str, current_os: str = CURRENT_OS
+) -> bool:
     """
-    Return True if a file should be untouched by the organizer:
-    - The organizer script itself
-    - Hidden files starting with '.'
-    - Microsoft Office temporary lock files starting with '~$'
-    - Windows system files (desktop.ini, thumbs.db, ntuser.dat, etc.)
-    - Incomplete downloads or shortcuts (.crdownload, .part, .tmp, .lnk)
-    - Files marked with Windows Hidden or System attributes
+    Specification 3 (Platform-Specific System & Hidden File Filtering by name):
+    - Cross-platform: Dotfiles (`.` prefix), Office lock files (`~$*`), incomplete
+      downloads (`.crdownload`, `.part`, `.tmp`), and editor swap files (`*.swp`).
+    - Windows: `desktop.ini`, `thumbs.db`, etc.
+    - macOS: `.DS_Store`, AppleDouble (`._*`), `.localized`, `.Trashes`, `.Spotlight-V100`, `Icon\\r`.
+    - Linux: Editor backup/swap files (`*.swp`, `*.swo`, `*~`, `#*#`), `.directory`.
+    """
+    if not filename:
+        return True
+
+    lower_name = filename.lower()
+
+    # Cross-platform: Any file starting with '.' (includes .DS_Store, ._* AppleDouble, .localized, etc.)
+    if filename.startswith("."):
+        return True
+
+    # Cross-platform: Office temporary lock files (~$Budget.xlsx)
+    if filename.startswith("~$"):
+        return True
+
+    # Linux / Unix editor backup and auto-save files (*~ and #*#)
+    if filename.endswith("~") or (
+        filename.startswith("#") and filename.endswith("#")
+    ):
+        return True
+
+    # Known OS system metadata filenames across Windows, macOS, and Linux
+    if lower_name in ALL_IGNORED_FILENAMES:
+        return True
+
+    # Incomplete download artifacts & swap extensions
+    ext = Path(filename).suffix.lower()
+    if ext in IGNORED_TEMP_EXTENSIONS:
+        return True
+
+    return False
+
+
+def should_ignore_file(
+    file_path: Path, script_path: Path, current_os: str = CURRENT_OS
+) -> bool:
+    """
+    Check both filename rules and OS-level hidden/system file attributes
+    (Windows FILE_ATTRIBUTE_HIDDEN / SYSTEM and macOS UF_HIDDEN).
     """
     try:
-        name = file_path.name
-        lower_name = name.lower()
-
         try:
             if file_path.resolve() == script_path:
                 return True
         except (OSError, ValueError):
             pass
 
-        if name.startswith(".") or name.startswith("~$"):
+        if should_ignore_filename_by_rules(file_path.name, current_os=current_os):
             return True
 
-        if lower_name in IGNORED_FILENAMES:
-            return True
+        if file_path.exists():
+            lstat_info = os.lstat(file_path)
+            # Windows hidden / system attributes
+            win_attrs = getattr(lstat_info, "st_file_attributes", 0)
+            if win_attrs & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM):
+                return True
 
-        if file_path.suffix.lower() in IGNORED_TEMP_EXTENSIONS:
-            return True
-
-        lstat_info = os.lstat(file_path)
-        attrs = getattr(lstat_info, "st_file_attributes", 0)
-        if attrs & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM):
-            return True
+            # macOS BSD UF_HIDDEN flag
+            bsd_flags = getattr(lstat_info, "st_flags", 0)
+            if bsd_flags & UF_HIDDEN:
+                return True
     except (OSError, ValueError):
         return True
 
@@ -639,13 +915,13 @@ def build_friendly_preview_sentence(category_counts: Dict[str, int]) -> str:
 
 
 # ==============================================================================
-# 5. CUSTOM ROUNDED BUTTON WIDGET (PURE TKINTER CANVAS)
+# 7. CUSTOM ROUNDED BUTTON WIDGET (PURE TKINTER CANVAS)
 # ==============================================================================
 
 class RoundedButton(tk.Canvas):
     """
-    A modern, rounded-corner button built on tk.Canvas so it looks like a
-    friendly consumer app button instead of a boxy legacy form control.
+    A modern, rounded-corner button built on tk.Canvas that renders consistently
+    across Windows, macOS, and Linux.
     """
 
     def __init__(
@@ -659,7 +935,7 @@ class RoundedButton(tk.Canvas):
         bg_color: str = "#2563EB",
         hover_color: str = "#1D4ED8",
         fg_color: str = "#FFFFFF",
-        font: tuple = ("Segoe UI", 10, "bold"),
+        font: tuple = (UI_FONT, 10, "bold"),
         canvas_bg: str = "#FFFFFF",
     ) -> None:
         super().__init__(
@@ -734,7 +1010,7 @@ class RoundedButton(tk.Canvas):
 
 
 # ==============================================================================
-# 6. MODERN, COMPACT 3-STEP APPLICATION
+# 8. MODERN, COMPACT 3-STEP APPLICATION (WINDOWS / MACOS / LINUX)
 # ==============================================================================
 
 class FriendlyFileOrganizerApp:
@@ -784,11 +1060,11 @@ class FriendlyFileOrganizerApp:
             self.script_path = Path.cwd() / "file_organizer.py"
 
         # State
-        self.current_folder: Path = self._resolve_user_folder("Downloads")
+        self.current_folder: Path = resolve_user_folder("Downloads")
         self.active_shortcut: str = "Downloads"
         self.shortcut_buttons: Dict[str, RoundedButton] = {}
         self.details_expanded: bool = False
-        self.running_as_admin: bool = is_running_as_admin()
+        self.running_elevated: bool = is_running_with_elevated_privileges()
 
         self._build_ui()
         self._update_folder_display()
@@ -808,19 +1084,6 @@ class FriendlyFileOrganizerApp:
         x = self.root.winfo_x()
         y = self.root.winfo_y()
         self.root.geometry(f"{self.WINDOW_WIDTH}x{height}+{x}+{y}")
-
-    def _resolve_user_folder(self, folder_name: str) -> Path:
-        """Locate standard Windows user folders (with OneDrive fallback)."""
-        home = Path.home()
-        direct = home / folder_name
-        if direct.exists():
-            return direct
-
-        onedrive = home / "OneDrive" / folder_name
-        if onedrive.exists():
-            return onedrive
-
-        return direct
 
     def _create_card(self, parent: tk.Widget, pady: tuple = (0, 10)) -> tk.Frame:
         """Create a crisp white panel card with a subtle border."""
@@ -849,23 +1112,25 @@ class FriendlyFileOrganizerApp:
         tk.Label(
             header,
             text="Easy File Organizer",
-            font=("Segoe UI", 16, "bold"),
+            font=(UI_FONT, 16, "bold"),
             fg=self.TEXT_PRIMARY,
             bg=self.BG_WINDOW,
             anchor="w",
         ).pack(fill=tk.X)
 
+        os_label = "macOS" if CURRENT_OS == "Darwin" else CURRENT_OS
         tk.Label(
             header,
-            text="Tidy up your loose files in 3 easy steps. Protected by built-in safety guards.",
-            font=("Segoe UI", 9),
+            text=f"Tidy up your loose files in 3 easy steps ({os_label}). Protected by built-in safety guards.",
+            font=(UI_FONT, 9),
             fg=self.TEXT_SECONDARY,
             bg=self.BG_WINDOW,
             anchor="w",
         ).pack(fill=tk.X, pady=(1, 0))
 
-        # Control 5: Gentle Principle-of-Least-Privilege banner if running as Admin
-        if self.running_as_admin:
+        # Specification 4: Principle-of-Least-Privilege banner if running as Admin / root
+        if self.running_elevated:
+            priv_name = "Administrator" if CURRENT_OS == "Windows" else "root"
             admin_banner = tk.Frame(
                 self.main_column,
                 bg="#FEF3C7",
@@ -877,8 +1142,8 @@ class FriendlyFileOrganizerApp:
             admin_banner.pack(fill=tk.X, pady=(0, 8))
             tk.Label(
                 admin_banner,
-                text="🛡️ Security Notice: Running as Administrator. For everyday use, we recommend opening this app as a standard user.",
-                font=("Segoe UI", 8, "bold"),
+                text=f"🛡️ Security Notice: Running with elevated {priv_name} privileges. Please run as a standard user.",
+                font=(UI_FONT, 8, "bold"),
                 fg="#92400E",
                 bg="#FEF3C7",
                 anchor="w",
@@ -892,7 +1157,7 @@ class FriendlyFileOrganizerApp:
         tk.Label(
             step1_card,
             text="Step 1: Where are your messy files?",
-            font=("Segoe UI", 11, "bold"),
+            font=(UI_FONT, 11, "bold"),
             fg=self.TEXT_PRIMARY,
             bg=self.BG_CARD,
             anchor="w",
@@ -916,7 +1181,7 @@ class FriendlyFileOrganizerApp:
                 bg_color=self.PILL_INACTIVE_BG,
                 hover_color=self.PILL_INACTIVE_HOVER,
                 fg_color=self.PILL_INACTIVE_FG,
-                font=("Segoe UI", 10, "bold"),
+                font=(UI_FONT, 10, "bold"),
                 canvas_bg=self.BG_CARD,
                 command=lambda name=folder_key: self._select_shortcut_folder(name),
             )
@@ -932,7 +1197,7 @@ class FriendlyFileOrganizerApp:
             bg_color=self.PILL_BROWSE_BG,
             hover_color=self.PILL_BROWSE_HOVER,
             fg_color=self.PILL_BROWSE_FG,
-            font=("Segoe UI", 9, "bold"),
+            font=(UI_FONT, 9, "bold"),
             canvas_bg=self.BG_CARD,
             command=self._browse_custom_folder,
         )
@@ -941,7 +1206,7 @@ class FriendlyFileOrganizerApp:
         self.current_folder_label = tk.Label(
             step1_card,
             text="Currently organizing: Downloads",
-            font=("Segoe UI", 11, "bold"),
+            font=(UI_FONT, 11, "bold"),
             fg=self.PILL_ACTIVE_BG,
             bg=self.BG_CARD,
             anchor="w",
@@ -959,7 +1224,7 @@ class FriendlyFileOrganizerApp:
         tk.Label(
             step2_top,
             text="Step 2: Safe Preview",
-            font=("Segoe UI", 11, "bold"),
+            font=(UI_FONT, 11, "bold"),
             fg=self.TEXT_PRIMARY,
             bg=self.BG_CARD,
             anchor="w",
@@ -974,7 +1239,7 @@ class FriendlyFileOrganizerApp:
             bg_color=self.PREVIEW_BTN_BG,
             hover_color=self.PREVIEW_BTN_HOVER,
             fg_color="#FFFFFF",
-            font=("Segoe UI", 9, "bold"),
+            font=(UI_FONT, 9, "bold"),
             canvas_bg=self.BG_CARD,
             command=self._run_safe_preview,
         )
@@ -983,7 +1248,7 @@ class FriendlyFileOrganizerApp:
         self.preview_summary_label = tk.Label(
             step2_card,
             text="Checking folder...",
-            font=("Segoe UI", 10),
+            font=(UI_FONT, 10),
             fg=self.TEXT_SECONDARY,
             bg=self.BG_CARD,
             wraplength=600,
@@ -1003,7 +1268,7 @@ class FriendlyFileOrganizerApp:
         tk.Label(
             step3_card,
             text="Step 3: Organize",
-            font=("Segoe UI", 11, "bold"),
+            font=(UI_FONT, 11, "bold"),
             fg=self.TEXT_PRIMARY,
             bg=self.BG_CARD,
             anchor="w",
@@ -1021,7 +1286,7 @@ class FriendlyFileOrganizerApp:
             bg_color=self.ORGANIZE_BTN_BG,
             hover_color=self.ORGANIZE_BTN_HOVER,
             fg_color="#FFFFFF",
-            font=("Segoe UI", 12, "bold"),
+            font=(UI_FONT, 12, "bold"),
             canvas_bg=self.BG_CARD,
             command=self._run_organize_files,
         )
@@ -1033,7 +1298,7 @@ class FriendlyFileOrganizerApp:
         self.status_banner = tk.Label(
             self.banner_frame,
             text="",
-            font=("Segoe UI", 11, "bold"),
+            font=(UI_FONT, 11, "bold"),
             bg=self.BG_CARD,
             fg=self.TEXT_SECONDARY,
             padx=12,
@@ -1045,7 +1310,7 @@ class FriendlyFileOrganizerApp:
         self.warning_label = tk.Label(
             self.banner_frame,
             text="",
-            font=("Segoe UI", 9, "bold"),
+            font=(UI_FONT, 9, "bold"),
             bg=self.BG_CARD,
             fg="#B45309",
             wraplength=580,
@@ -1061,7 +1326,7 @@ class FriendlyFileOrganizerApp:
         self.toggle_details_btn = tk.Label(
             advanced_bar,
             text="▸ Show individual file details (advanced)",
-            font=("Segoe UI", 9),
+            font=(UI_FONT, 9),
             fg="#64748B",
             bg=self.BG_WINDOW,
             cursor="hand2",
@@ -1083,7 +1348,7 @@ class FriendlyFileOrganizerApp:
             self.details_drawer,
             height=6,
             wrap=tk.WORD,
-            font=("Segoe UI", 9),
+            font=(UI_FONT, 9),
             bg="#F8FAFC",
             fg=self.TEXT_PRIMARY,
             relief=tk.FLAT,
@@ -1127,7 +1392,7 @@ class FriendlyFileOrganizerApp:
             tk.Label(
                 empty_badge,
                 text="✨ No loose files waiting to be sorted in this folder!",
-                font=("Segoe UI", 10, "bold"),
+                font=(UI_FONT, 10, "bold"),
                 fg="#059669",
                 bg="#F8FAFC",
             ).pack(anchor="w")
@@ -1160,7 +1425,7 @@ class FriendlyFileOrganizerApp:
             tk.Label(
                 badge,
                 text=f"• {icon} {category}:",
-                font=("Segoe UI", 10),
+                font=(UI_FONT, 10),
                 fg=self.TEXT_PRIMARY,
                 bg="#F8FAFC",
                 anchor="w",
@@ -1169,7 +1434,7 @@ class FriendlyFileOrganizerApp:
             tk.Label(
                 badge,
                 text=f"{count} {file_word}",
-                font=("Segoe UI", 10, "bold"),
+                font=(UI_FONT, 10, "bold"),
                 fg=self.PILL_ACTIVE_BG,
                 bg="#F8FAFC",
                 anchor="e",
@@ -1201,10 +1466,11 @@ class FriendlyFileOrganizerApp:
             self.status_banner.pack(fill=tk.X, pady=(4, 2))
 
         if warnings:
-            # Show up to 3 concise warnings in the main card; full list is in advanced details
             shown = warnings[:3]
             if len(warnings) > 3:
-                shown.append(f"...and {len(warnings) - 3} more skipped items (see advanced details).")
+                shown.append(
+                    f"...and {len(warnings) - 3} more skipped items (see advanced details)."
+                )
             self.warning_label.configure(text="\n".join(f"⚠️ {w}" for w in shown))
             self.warning_label.pack(fill=tk.X, pady=(2, 0))
         else:
@@ -1238,14 +1504,11 @@ class FriendlyFileOrganizerApp:
         self.status_box.configure(state=tk.DISABLED)
 
     # ==========================================================================
-    # STEP 1: FOLDER SELECTION HANDLERS (WITH BLACKLIST ENFORCEMENT)
+    # STEP 1: FOLDER SELECTION HANDLERS (WITH OS BLACKLIST ENFORCEMENT)
     # ==========================================================================
 
     def _try_set_target_folder(self, candidate: Path, shortcut_name: str = "") -> bool:
-        """
-        Validate `candidate` against Control 1 (Critical System Path Blacklist)
-        before allowing it to be set as `self.current_folder`.
-        """
+        """Validate `candidate` against the OS system path blacklist before setting."""
         is_blocked, _reason = is_protected_system_path(candidate)
         if is_blocked:
             messagebox.showerror(
@@ -1262,7 +1525,7 @@ class FriendlyFileOrganizerApp:
 
     def _select_shortcut_folder(self, folder_name: str) -> None:
         """Handle clicking [Downloads], [Desktop], or [Documents]."""
-        candidate = self._resolve_user_folder(folder_name)
+        candidate = resolve_user_folder(folder_name)
         self._try_set_target_folder(candidate, shortcut_name=folder_name)
 
     def _browse_custom_folder(self) -> None:
@@ -1313,15 +1576,12 @@ class FriendlyFileOrganizerApp:
     ) -> Tuple[List[Tuple[Path, str]], List[str], str]:
         """
         Scan only loose top-level files in the selected folder while enforcing:
-        - Control 1: Critical System Path Blacklisting
-        - Control 2: Filename Sanitization, ADS blocking & Reserved Device Name filtering
-        - Control 3: Symlink, NTFS Junction & Reparse Point exclusion
-        - Control 5: Per-entry exception isolation
-
-        Returns:
-            (eligible_items [(path, sanitized_name)], security_notes, fatal_error_msg)
+        - OS-specific Critical System Path Blacklisting
+        - Cross-platform Hidden & System Metadata Filtering
+        - Filename Sanitization, ADS blocking & Reserved Device Name filtering
+        - Symlink, NTFS Junction & Reparse Point exclusion
+        - Per-entry exception isolation
         """
-        # Control 1: Re-verify target folder against system path blacklist
         is_blocked, _reason = is_protected_system_path(self.current_folder)
         if is_blocked:
             return [], [], PROTECTED_FOLDER_MESSAGE
@@ -1341,7 +1601,7 @@ class FriendlyFileOrganizerApp:
             return (
                 [],
                 [],
-                "Windows blocked access to this folder. Please choose one of your personal folders like Downloads or Documents.",
+                "Access to this folder was denied by your operating system. Please choose one of your personal folders.",
             )
         except (OSError, ValueError):
             return (
@@ -1355,25 +1615,21 @@ class FriendlyFileOrganizerApp:
 
         for item in entries:
             try:
-                # Control 3: Never follow or move symlinks or NTFS junction points
                 if is_symlink_or_junction(item):
                     security_notes.append(
                         f"Skipped '{item.name}' (symbolic link or junction point ignored for safety)."
                     )
                     continue
 
-                # Ignore directories and non-regular files
                 lstat_info = os.lstat(item)
                 if stat.S_ISDIR(lstat_info.st_mode) or not stat.S_ISREG(
                     lstat_info.st_mode
                 ):
                     continue
 
-                # Ignore standard hidden/system/temp files
                 if should_ignore_file(item, self.script_path):
                     continue
 
-                # Control 2: Inspect & sanitize filename against ADS, RLO spoofing, and reserved names
                 is_safe, sanitized_name, block_reason = inspect_and_sanitize_filename(
                     item.name
                 )
@@ -1386,7 +1642,6 @@ class FriendlyFileOrganizerApp:
                 eligible_items.append((item, sanitized_name))
 
             except (PermissionError, OSError, ValueError):
-                # Control 5: Isolate per-file OS/permission errors so scanning never crashes
                 continue
 
         return eligible_items, security_notes, ""
@@ -1417,7 +1672,6 @@ class FriendlyFileOrganizerApp:
                 dest_dir, sanitized_name, reserved_destinations
             )
 
-            # Control 2: Verify path containment even during preview
             if not verify_path_containment(self.current_folder, dest_dir, safe_dest):
                 security_notes.append(
                     f"Blocked '{file_path.name}' (failed path containment check)."
@@ -1440,7 +1694,7 @@ class FriendlyFileOrganizerApp:
         self.preview_summary_label.configure(
             text=summary_sentence,
             fg=self.TEXT_PRIMARY if category_counts else self.TEXT_SECONDARY,
-            font=("Segoe UI", 10, "bold" if category_counts else "normal"),
+            font=(UI_FONT, 10, "bold" if category_counts else "normal"),
         )
 
         self._render_category_badges(category_counts)
@@ -1521,7 +1775,7 @@ class FriendlyFileOrganizerApp:
             self.preview_summary_label.configure(
                 text=f"Sorted {moved_count} {file_word} into these folders:",
                 fg=self.TEXT_PRIMARY,
-                font=("Segoe UI", 10, "bold"),
+                font=(UI_FONT, 10, "bold"),
             )
             self._render_category_badges(moved_counts_by_cat)
             self._show_banner(
