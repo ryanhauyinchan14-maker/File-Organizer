@@ -1,34 +1,34 @@
 """
 Easy File Organizer (Cross-Platform Security-Hardened Edition)
 ==============================================================
-A modern, compact, beginner-friendly desktop utility for Windows, macOS, and Linux
+A modern, responsive, beginner-friendly desktop utility for Windows, macOS, and Linux
 that sorts loose files into neat category subfolders in 3 simple steps, backed by
-enterprise-grade defensive programming and OS-aware security controls.
+dynamic folder queue prioritization and enterprise-grade security controls.
 
 Features & Security Controls Implemented:
-1. Custom Embedded App & Taskbar Icon:
+1. Dynamic "Messy Folders" Queue & Auto-Prioritization:
+   - Automatically scans candidate folders (Downloads, Desktop, Documents, plus any
+     custom folders added by the user) and counts loose, unsorted files in each.
+   - Dynamically ranks folders so the messiest directories rise to the front of the
+     queue with live count badges (e.g., `[📥 Downloads (15)]`, `[🖥️ Desktop (4)]`),
+     while already-clean folders (`0` loose files) are demoted to the end of the line.
+   - Automatically focuses the messiest folder on launch and auto-advances to the
+     next messy folder in the queue as soon as the current folder is organized!
+2. Responsive Resizable Layout:
+   - Freely resizable (`860x730` default, `720x620` minimum) using responsive Tkinter
+     grid weights so step cards scale smoothly and the bottom details log expands
+     vertically to utilize extra screen space.
+3. Custom Embedded App & Taskbar Icon:
    - Generates a crisp, self-contained PNG folder/organizer icon in memory using
-     only standard library (`zlib`, `struct`, `base64`)—zero external icon files.
-   - Registers a dedicated Windows AppUserModelID via
-     `ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID` so both the
-     window title bar and Windows taskbar display the custom icon.
-2. "Undo Last Organize" Transaction System:
-   - Records every file move in a transaction log (`last_transaction`).
-   - Provides an `[↩ Undo Last Organize]` button that safely restores the previous
-     batch of sorted files back to their original locations, handling any name
-     conflicts non-destructively without overwriting.
-3. "Auto-Sort" Background Watcher (Live Watcher):
-   - Optional background daemon thread (`threading.Thread(daemon=True)`) that
-     monitors the selected folder for newly added files.
-   - Enforces download safety: ignores active temp/partial files (`.crdownload`,
-     `.part`, `.tmp`, `~$*`) and waits for file size & modification time stability
-     across a multi-second window before moving.
-4. Cross-Platform & Enterprise Security Hardening:
-   - Dynamic OS detection (`platform.system()`) for Windows, macOS, and Linux (XDG).
-   - OS-specific system folder blacklists (blocks root drives, OS trees, and `Path.home()`).
-   - Path containment (`os.path.commonpath`), symlink/junction defense (`os.lstat`),
-     Unicode RLO (`\\u202E`) stripping, ADS (`:`) blocking, and Reserved Device Name filtering.
-   - Strict zero-deletion and zero-overwrite guarantee.
+     only standard library (`zlib`, `struct`, `base64`) and sets the Windows
+     `AppUserModelID` so both title bar and taskbar show the custom icon.
+4. "Undo Last Organize" & "Auto-Sort" Background Watcher:
+   - Full transaction reversal (`[↩ Undo Last Organize]`) with conflict protection.
+   - Live background watcher thread with download-stability delay (`1.5s`).
+5. Cross-Platform & Enterprise Security Hardening:
+   - OS-specific blacklists (Windows, macOS, Linux), `os.path.commonpath` containment,
+     symlink/junction defense, Unicode RLO (`\\u202E`) stripping, ADS (`:`) blocking,
+     Reserved Device Name filtering, and a strict zero-deletion/zero-overwrite guarantee.
 
 Uses only the Python standard library:
 base64, ctypes, os, pathlib, platform, shutil, stat, struct, threading, time, tkinter, typing, zlib.
@@ -63,7 +63,7 @@ elif CURRENT_OS == "Darwin":
 else:
     UI_FONT = "DejaVu Sans"
 
-APP_USER_MODEL_ID: str = "EasyFileOrganizer.Desktop.Utility.2"
+APP_USER_MODEL_ID: str = "EasyFileOrganizer.Desktop.Utility.3"
 
 
 def set_windows_app_user_model_id() -> None:
@@ -85,7 +85,6 @@ def build_embedded_icon_png_base64(size: int = 64) -> str:
     """
     Generate a crisp, modern folder-organizer PNG icon in memory using only
     `struct`, `zlib`, and `base64` (100% standalone, no external image files).
-    Draws a sleek rounded blue folder with a white document sheet and green badge.
     """
     rows: List[bytes] = []
     scale = size / 64.0
@@ -97,41 +96,32 @@ def build_embedded_icon_png_base64(size: int = 64) -> str:
             fx = x / scale
             r, g, b, a = 0, 0, 0, 0
 
-            # 1. Folder back tab (top-left rounded shape)
             in_tab = (8 <= fx <= 28) and (10 <= fy <= 20)
-            # 2. Folder main body
             in_back = (6 <= fx <= 58) and (16 <= fy <= 54)
-            # 3. White document card peeking out of the folder
             in_doc = (16 <= fx <= 48) and (13 <= fy <= 32)
-            # 4. Front folder pocket flap
             in_flap = (6 <= fx <= 58) and (25 <= fy <= 54)
 
             if in_tab or in_back:
-                # Deep cobalt folder back (#1D4ED8)
                 r, g, b, a = 29, 78, 216, 255
 
             if in_doc:
-                # Crisp white document (#FFFFFF) with subtle blue lines
                 if (22 <= fx <= 42) and (int(fy) in (18, 22)):
                     r, g, b, a = 147, 197, 253, 255
                 else:
                     r, g, b, a = 255, 255, 255, 255
 
             if in_flap:
-                # Bright modern blue folder front (#3B82F6 -> #2563EB gradient)
                 shade = int((fy - 25) * 0.9)
                 r = max(37 - shade // 2, 25)
                 g = max(115 - shade, 85)
                 b = min(246, 235)
                 a = 255
 
-            # 5. Emerald green checkmark / organizer badge in bottom-right corner
             dx = fx - 46.0
             dy = fy - 42.0
             dist_sq = dx * dx + dy * dy
-            if dist_sq <= 121.0:  # Radius 11 badge
-                r, g, b, a = 16, 185, 129, 255  # #10B981 emerald badge
-                # White checkmark inside badge
+            if dist_sq <= 121.0:
+                r, g, b, a = 16, 185, 129, 255
                 if (
                     abs((fx - 41) - (fy - 41)) <= 1.8 and 41 <= fx <= 45 and 41 <= fy <= 45
                 ) or (
@@ -148,7 +138,7 @@ def build_embedded_icon_png_base64(size: int = 64) -> str:
         crc = zlib.crc32(chunk_type + data) & 0xFFFFFFFF
         return struct.pack(">I", len(data)) + chunk_type + data + struct.pack(">I", crc)
 
-    ihdr = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)  # 8-bit RGBA
+    ihdr = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)
     idat = zlib.compress(raw_data, level=9)
     png_bytes = (
         b"\x89PNG\r\n\x1a\n"
@@ -160,10 +150,7 @@ def build_embedded_icon_png_base64(size: int = 64) -> str:
 
 
 def apply_app_icon(root: tk.Tk) -> List[tk.PhotoImage]:
-    """
-    Attach the embedded 64x64 and 32x32 custom icons to the Tk window and
-    return the PhotoImage references so Python's garbage collector keeps them alive.
-    """
+    """Attach the embedded 64x64 and 32x32 custom icons to the Tk window."""
     icons: List[tk.PhotoImage] = []
     try:
         icon_64 = tk.PhotoImage(data=build_embedded_icon_png_base64(64))
@@ -228,6 +215,13 @@ EXTENSION_TO_CATEGORY: Dict[str, str] = {
     for ext in extensions
 }
 
+# Friendly icons for standard user folders in the dynamic queue
+FOLDER_ICONS: Dict[str, str] = {
+    "downloads": "📥",
+    "desktop": "🖥️",
+    "documents": "📄",
+}
+
 
 # ==============================================================================
 # 3. SECURITY & METADATA FILTER CONSTANTS
@@ -270,7 +264,6 @@ ALL_IGNORED_FILENAMES: Set[str] = (
     WINDOWS_IGNORED_FILENAMES | MACOS_IGNORED_FILENAMES | LINUX_IGNORED_FILENAMES
 )
 
-# Incomplete download artifacts & OS shortcut/swap extensions
 IGNORED_TEMP_EXTENSIONS: Set[str] = {
     ".tmp",
     ".temp",
@@ -308,7 +301,6 @@ UNICODE_SPOOFING_CHARS: Set[str] = {
 
 FORBIDDEN_FILENAME_CHARS: Set[str] = set('<>:"/\\|?*')
 
-# Auto-Sort watcher timing constants (seconds)
 WATCHER_POLL_INTERVAL_SEC: float = 0.6
 WATCHER_STABILITY_WINDOW_SEC: float = 1.5
 
@@ -478,7 +470,6 @@ def is_protected_system_path(
 
     norm_target = _normalize_path_str(str(resolved), current_os)
 
-    # 1. Block root directories on all platforms ('/' on POSIX, 'C:\', 'D:\' on Windows)
     if norm_target in ("/", "\\") or (
         len(norm_target) in (2, 3)
         and norm_target[1:2] == ":"
@@ -489,7 +480,6 @@ def is_protected_system_path(
     if resolved.parent == resolved:
         return True, "Root filesystem directories cannot be organized."
 
-    # 2. Prevent organizing the root user home directory itself on all platforms
     try:
         home = Path.home()
         norm_home = _normalize_path_str(str(home), current_os)
@@ -499,7 +489,6 @@ def is_protected_system_path(
     except (OSError, ValueError):
         home = None
 
-    # 3. OS-Specific Blacklists
     if current_os == "Windows":
         drive_anchor = resolved.anchor or "C:\\"
         if not drive_anchor.endswith("\\"):
@@ -868,32 +857,49 @@ def atomic_verified_restore(
     """
     Safely move a sorted file from its category subfolder (`moved_path`) back to
     the root target folder (`restore_dest`) for the "Undo Last Organize" feature.
-    Never overwrites existing files and verifies containment and integrity.
     """
     try:
         if not moved_path.exists() or is_symlink_or_junction(moved_path):
-            return False, f"Could not restore '{moved_path.name}' (file was already moved or modified)."
+            return (
+                False,
+                f"Could not restore '{moved_path.name}' (file was already moved or modified).",
+            )
 
         category_dir = moved_path.parent
         if not verify_path_containment(base_dir, category_dir, moved_path):
-            return False, f"Blocked restore of '{moved_path.name}': Outside target folder."
+            return (
+                False,
+                f"Blocked restore of '{moved_path.name}': Outside target folder.",
+            )
 
         if restore_dest.resolve().parent != base_dir.resolve():
-            return False, f"Blocked restore of '{moved_path.name}': Invalid restore destination."
+            return (
+                False,
+                f"Blocked restore of '{moved_path.name}': Invalid restore destination.",
+            )
 
         if current_os != "Windows":
             if not os.access(moved_path, os.W_OK) or not os.access(base_dir, os.W_OK):
-                return False, f"Skipped restoring '{moved_path.name}' (write permission denied)."
+                return (
+                    False,
+                    f"Skipped restoring '{moved_path.name}' (write permission denied).",
+                )
 
         pre_stat = os.lstat(moved_path)
         if not stat.S_ISREG(pre_stat.st_mode):
-            return False, f"Skipped restoring '{moved_path.name}' (not a regular file)."
+            return (
+                False,
+                f"Skipped restoring '{moved_path.name}' (not a regular file).",
+            )
 
         expected_size = pre_stat.st_size
         expected_ino = pre_stat.st_ino
 
         if restore_dest.exists():
-            return False, f"Skipped restoring '{moved_path.name}' to avoid overwriting."
+            return (
+                False,
+                f"Skipped restoring '{moved_path.name}' to avoid overwriting.",
+            )
 
         shutil.move(
             str(moved_path),
@@ -911,14 +917,23 @@ def atomic_verified_restore(
                 and post_stat.st_ino != expected_ino
             )
         ):
-            return False, f"Warning: '{restore_dest.name}' verification mismatch after undo."
+            return (
+                False,
+                f"Warning: '{restore_dest.name}' verification mismatch after undo.",
+            )
 
         return True, ""
 
     except PermissionError:
-        return False, f"Could not restore '{moved_path.name}' because it is open in another app."
+        return (
+            False,
+            f"Could not restore '{moved_path.name}' because it is open in another app.",
+        )
     except (OSError, ValueError):
-        return False, f"Could not restore '{moved_path.name}' because it is in use."
+        return (
+            False,
+            f"Could not restore '{moved_path.name}' because it is in use.",
+        )
 
 
 # ==============================================================================
@@ -988,6 +1003,39 @@ def should_ignore_file(
         return True
 
     return False
+
+
+def count_eligible_loose_files(directory: Path, script_path: Path) -> int:
+    """
+    Quickly count how many loose, unsorted eligible files exist at the top level
+    of `directory` for the dynamic folder queue ranking system.
+    """
+    is_blocked, _ = is_protected_system_path(directory)
+    if is_blocked or not directory.exists() or not directory.is_dir():
+        return 0
+
+    count = 0
+    try:
+        for item in directory.iterdir():
+            try:
+                if is_symlink_or_junction(item):
+                    continue
+                lstat_info = os.lstat(item)
+                if stat.S_ISDIR(lstat_info.st_mode) or not stat.S_ISREG(
+                    lstat_info.st_mode
+                ):
+                    continue
+                if should_ignore_file(item, script_path):
+                    continue
+                is_safe, _, _ = inspect_and_sanitize_filename(item.name)
+                if is_safe:
+                    count += 1
+            except (PermissionError, OSError, ValueError):
+                continue
+    except (PermissionError, OSError, ValueError):
+        return 0
+
+    return count
 
 
 def get_category_for_filename(sanitized_filename: str) -> str:
@@ -1066,13 +1114,14 @@ def build_friendly_preview_sentence(category_counts: Dict[str, int]) -> str:
 
 
 # ==============================================================================
-# 7. CUSTOM ROUNDED BUTTON WIDGET (WITH ENABLED / DISABLED STATES)
+# 7. CUSTOM ROUNDED BUTTON WIDGET (WITH DYNAMIC TEXT & COLOR UPDATES)
 # ==============================================================================
 
 class RoundedButton(tk.Canvas):
     """
     A modern, rounded-corner button built on tk.Canvas that renders consistently
-    across Windows, macOS, and Linux, supporting enabled and disabled states.
+    across Windows, macOS, and Linux, supporting enabled/disabled states and
+    dynamic label updates.
     """
 
     DISABLED_BG = "#E2E8F0"
@@ -1144,6 +1193,14 @@ class RoundedButton(tk.Canvas):
             font=self.font,
         )
 
+    def set_text(self, text: str, width: Optional[int] = None) -> None:
+        """Update button label and optionally resize button width."""
+        self.text = text
+        if width is not None and width != self.btn_width:
+            self.btn_width = width
+            self.configure(width=width)
+        self._draw()
+
     def set_enabled(self, enabled: bool) -> None:
         """Enable or disable the button visually and functionally."""
         self.enabled = enabled
@@ -1178,11 +1235,14 @@ class RoundedButton(tk.Canvas):
 
 
 # ==============================================================================
-# 8. MODERN, COMPACT 3-STEP APPLICATION (WITH UNDO & LIVE AUTO-SORT WATCHER)
+# 8. RESPONSIVE 3-STEP APPLICATION WITH DYNAMIC MESSY FOLDER QUEUE
 # ==============================================================================
 
 class FriendlyFileOrganizerApp:
-    """Compact, centered, modern 3-step file organizer window."""
+    """
+    Responsive, modern 3-step file organizer featuring dynamic folder queue
+    prioritization, auto-progression, undo support, and a live auto-sort watcher.
+    """
 
     BG_WINDOW = "#F4F6F8"
     BG_CARD = "#FFFFFF"
@@ -1190,15 +1250,23 @@ class FriendlyFileOrganizerApp:
     TEXT_PRIMARY = "#0F172A"
     TEXT_SECONDARY = "#475569"
 
+    # Active selected folder pill
     PILL_ACTIVE_BG = "#2563EB"
     PILL_ACTIVE_HOVER = "#1D4ED8"
     PILL_ACTIVE_FG = "#FFFFFF"
 
-    PILL_INACTIVE_BG = "#EFF6FF"
-    PILL_INACTIVE_HOVER = "#DBEAFE"
-    PILL_INACTIVE_FG = "#1E40AF"
+    # Unselected folder pill with messy files waiting (> 0)
+    PILL_MESSY_BG = "#EFF6FF"
+    PILL_MESSY_HOVER = "#DBEAFE"
+    PILL_MESSY_FG = "#1E40AF"
 
-    PILL_BROWSE_BG = "#F1F5F9"
+    # Demoted clean folder pill (0 loose files)
+    PILL_CLEAN_BG = "#F1F5F9"
+    PILL_CLEAN_HOVER = "#E2E8F0"
+    PILL_CLEAN_FG = "#64748B"
+
+    # Browse / Add Folder button
+    PILL_BROWSE_BG = "#F8FAFC"
     PILL_BROWSE_HOVER = "#E2E8F0"
     PILL_BROWSE_FG = "#334155"
 
@@ -1211,21 +1279,26 @@ class FriendlyFileOrganizerApp:
     UNDO_BTN_BG = "#475569"
     UNDO_BTN_HOVER = "#334155"
 
-    WINDOW_WIDTH = 700
-    WINDOW_HEIGHT_COLLAPSED = 665
-    WINDOW_HEIGHT_EXPANDED = 810
+    # Default & minimum window dimensions (freely resizable)
+    WINDOW_DEFAULT_WIDTH = 860
+    WINDOW_DEFAULT_HEIGHT = 730
+    WINDOW_MIN_WIDTH = 720
+    WINDOW_MIN_HEIGHT = 620
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Easy File Organizer")
         self.root.configure(bg=self.BG_WINDOW)
-        self.root.resizable(False, False)
 
-        # Attach embedded custom organizer icon (and keep references alive)
+        # Requirement 2: Make the window freely resizable with comfortable minsize
+        self.root.resizable(True, True)
+        self.root.minsize(self.WINDOW_MIN_WIDTH, self.WINDOW_MIN_HEIGHT)
+
+        # Attach embedded custom organizer icon
         self._icon_refs = apply_app_icon(self.root)
 
-        # Center the compact window on the user's screen
-        self._center_window(self.WINDOW_WIDTH, self.WINDOW_HEIGHT_COLLAPSED)
+        # Center the window on launch
+        self._center_window(self.WINDOW_DEFAULT_WIDTH, self.WINDOW_DEFAULT_HEIGHT)
 
         # Remember this script's path so it never moves itself
         try:
@@ -1233,28 +1306,41 @@ class FriendlyFileOrganizerApp:
         except (NameError, OSError):
             self.script_path = Path.cwd() / "file_organizer.py"
 
-        # Core State
-        self.current_folder: Path = resolve_user_folder("Downloads")
-        self.active_shortcut: str = "Downloads"
-        self.shortcut_buttons: Dict[str, RoundedButton] = {}
+        # Requirement 1: Dynamic Candidate Folder Queue
+        self.candidate_folders: List[Path] = []
+        for default_name in ("Downloads", "Desktop", "Documents"):
+            resolved_dir = resolve_user_folder(default_name)
+            self._add_candidate_folder_internal(resolved_dir)
+
+        self.folder_loose_counts: Dict[str, int] = {}
+        self.ranked_folders: List[Path] = list(self.candidate_folders)
+        self.queue_buttons: Dict[str, RoundedButton] = {}
+
+        # Scan & rank folders on startup, and auto-focus the messiest folder first
+        self._recalculate_folder_rankings()
+        self.current_folder: Path = (
+            self.ranked_folders[0]
+            if self.ranked_folders
+            else resolve_user_folder("Downloads")
+        )
+
         self.details_expanded: bool = False
         self.running_elevated: bool = is_running_with_elevated_privileges()
 
-        # Feature 2: Undo Transaction Log [(moved_dest_path, original_source_path), ...]
+        # Undo Transaction Log [(moved_dest_path, original_source_path), ...]
         self.last_transaction: List[Tuple[Path, Path]] = []
 
-        # Feature 3: Live Auto-Sort Background Watcher State
+        # Live Auto-Sort Background Watcher State
         self.auto_sort_var = tk.BooleanVar(value=False)
         self._auto_sort_enabled: bool = False
         self._op_lock = threading.Lock()
         self._watcher_stop_event = threading.Event()
         self._watcher_thread: Optional[threading.Thread] = None
-        # Tracks file stability: {Path: (size, mtime_ns, stable_since_monotonic)}
         self._watched_file_states: Dict[Path, Tuple[int, int, float]] = {}
-        # Thread-safe queue of auto-sorted results for the main Tk thread to display
         self._pending_auto_sorted: List[Tuple[Path, Path, str]] = []
 
         self._build_ui()
+        self._refresh_folder_queue_ui()
         self._update_folder_display()
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -1273,119 +1359,117 @@ class FriendlyFileOrganizerApp:
         y = max((screen_h - height) // 2 - 20, 20)
         self.root.geometry(f"{width}x{height}+{x}+{y}")
 
-    def _set_window_height(self, height: int) -> None:
-        """Adjust window height smoothly when opening/closing the advanced details drawer."""
-        self.root.update_idletasks()
-        x = self.root.winfo_x()
-        y = self.root.winfo_y()
-        self.root.geometry(f"{self.WINDOW_WIDTH}x{height}+{x}+{y}")
+    # ==========================================================================
+    # DYNAMIC "MESSY FOLDERS" QUEUE & AUTO-PRIORITIZATION ENGINE
+    # ==========================================================================
 
-    def _create_card(self, parent: tk.Widget, pady: tuple = (0, 10)) -> tk.Frame:
-        """Create a crisp white panel card with a subtle border."""
-        card = tk.Frame(
-            parent,
-            bg=self.BG_CARD,
-            highlightbackground=self.BORDER_CARD,
-            highlightthickness=1,
-            padx=18,
-            pady=13,
-        )
-        card.pack(fill=tk.X, pady=pady)
-        return card
+    def _folder_key(self, folder: Path) -> str:
+        """Return a normalized key string for deduplicating and indexing a folder."""
+        return _normalize_path_str(str(folder), CURRENT_OS)
 
-    def _build_ui(self) -> None:
-        """Build the compact 3-step visual interface."""
-        self.main_column = tk.Frame(
-            self.root, bg=self.BG_WINDOW, width=652, padx=24, pady=12
-        )
-        self.main_column.pack(anchor=tk.N, fill=tk.BOTH, expand=True)
+    def _add_candidate_folder_internal(self, folder: Path) -> bool:
+        """Add `folder` to `self.candidate_folders` if not already present."""
+        key = self._folder_key(folder)
+        for existing in self.candidate_folders:
+            if self._folder_key(existing) == key:
+                return False
+        self.candidate_folders.append(folder)
+        return True
 
-        # --- App Header ---
-        header = tk.Frame(self.main_column, bg=self.BG_WINDOW)
-        header.pack(fill=tk.X, pady=(0, 8))
+    def _recalculate_folder_rankings(self) -> None:
+        """
+        Scan all candidate folders, count loose unsorted files in each, and sort
+        `self.ranked_folders` so messy folders (> 0 files) rise to the front in
+        descending order of messiness while clean folders (0 files) are demoted
+        to the end of the line.
+        """
+        counts: Dict[str, int] = {}
+        for folder in self.candidate_folders:
+            key = self._folder_key(folder)
+            counts[key] = count_eligible_loose_files(folder, self.script_path)
 
-        tk.Label(
-            header,
-            text="Easy File Organizer",
-            font=(UI_FONT, 16, "bold"),
-            fg=self.TEXT_PRIMARY,
-            bg=self.BG_WINDOW,
-            anchor="w",
-        ).pack(fill=tk.X)
+        self.folder_loose_counts = counts
 
-        os_label = "macOS" if CURRENT_OS == "Darwin" else CURRENT_OS
-        tk.Label(
-            header,
-            text=f"Tidy up your loose files in 3 easy steps ({os_label}). Protected by built-in safety guards.",
-            font=(UI_FONT, 9),
-            fg=self.TEXT_SECONDARY,
-            bg=self.BG_WINDOW,
-            anchor="w",
-        ).pack(fill=tk.X, pady=(1, 0))
-
-        if self.running_elevated:
-            priv_name = "Administrator" if CURRENT_OS == "Windows" else "root"
-            admin_banner = tk.Frame(
-                self.main_column,
-                bg="#FEF3C7",
-                highlightbackground="#F59E0B",
-                highlightthickness=1,
-                padx=12,
-                pady=5,
+        # Sort by:
+        # 1. Whether folder has loose files (messy first, clean demoted to end)
+        # 2. Descending loose file count (messiest first)
+        # 3. Original insertion index (stable tie-breaker)
+        indexed = list(enumerate(self.candidate_folders))
+        indexed.sort(
+            key=lambda pair: (
+                0 if counts.get(self._folder_key(pair[1]), 0) > 0 else 1,
+                -counts.get(self._folder_key(pair[1]), 0),
+                pair[0],
             )
-            admin_banner.pack(fill=tk.X, pady=(0, 8))
-            tk.Label(
-                admin_banner,
-                text=f"🛡️ Security Notice: Running with elevated {priv_name} privileges. Please run as a standard user.",
-                font=(UI_FONT, 8, "bold"),
-                fg="#92400E",
-                bg="#FEF3C7",
-                anchor="w",
-            ).pack(fill=tk.X)
+        )
+        self.ranked_folders = [pair[1] for pair in indexed]
 
-        # ======================================================================
-        # STEP 1: WHERE ARE YOUR MESSY FILES?
-        # ======================================================================
-        step1_card = self._create_card(self.main_column)
+    def _get_folder_button_label(self, folder: Path, count: int) -> str:
+        """Format the dynamic folder pill text with icon and count badge."""
+        name = folder.name or str(folder)
+        icon = FOLDER_ICONS.get(name.lower(), "📁")
+        if count > 0:
+            return f"{icon} {name} ({count})"
+        return f"✓ {name} (0)"
 
-        tk.Label(
-            step1_card,
-            text="Step 1: Where are your messy files?",
-            font=(UI_FONT, 11, "bold"),
-            fg=self.TEXT_PRIMARY,
-            bg=self.BG_CARD,
-            anchor="w",
-        ).pack(fill=tk.X, pady=(0, 9))
+    def _refresh_folder_queue_ui(self) -> None:
+        """
+        Rebuild the Step 1 dynamic folder queue buttons in ranked order
+        (messiest folders first, clean folders demoted to the end, followed by
+        [📂 Browse / Add Folder...]).
+        """
+        for child in self.queue_container.winfo_children():
+            child.destroy()
+        self.queue_buttons.clear()
 
-        btn_row = tk.Frame(step1_card, bg=self.BG_CARD)
-        btn_row.pack(fill=tk.X, pady=(0, 9))
+        active_key = self._folder_key(self.current_folder)
 
-        shortcut_meta = [
-            ("Downloads", "📥 Downloads", 132),
-            ("Desktop", "🖥️ Desktop", 122),
-            ("Documents", "📄 Documents", 136),
-        ]
-        for folder_key, label_text, width in shortcut_meta:
+        for folder in self.ranked_folders:
+            key = self._folder_key(folder)
+            count = self.folder_loose_counts.get(key, 0)
+            label_text = self._get_folder_button_label(folder, count)
+            btn_width = max(138, min(240, len(label_text) * 8 + 28))
+
+            is_active = key == active_key
+            if is_active:
+                bg, hover, fg = (
+                    self.PILL_ACTIVE_BG,
+                    self.PILL_ACTIVE_HOVER,
+                    self.PILL_ACTIVE_FG,
+                )
+            elif count > 0:
+                bg, hover, fg = (
+                    self.PILL_MESSY_BG,
+                    self.PILL_MESSY_HOVER,
+                    self.PILL_MESSY_FG,
+                )
+            else:
+                bg, hover, fg = (
+                    self.PILL_CLEAN_BG,
+                    self.PILL_CLEAN_HOVER,
+                    self.PILL_CLEAN_FG,
+                )
+
             btn = RoundedButton(
-                btn_row,
+                self.queue_container,
                 text=label_text,
-                width=width,
+                width=btn_width,
                 height=36,
                 corner_radius=10,
-                bg_color=self.PILL_INACTIVE_BG,
-                hover_color=self.PILL_INACTIVE_HOVER,
-                fg_color=self.PILL_INACTIVE_FG,
-                font=(UI_FONT, 10, "bold"),
+                bg_color=bg,
+                hover_color=hover,
+                fg_color=fg,
+                font=(UI_FONT, 9, "bold"),
                 canvas_bg=self.BG_CARD,
-                command=lambda name=folder_key: self._select_shortcut_folder(name),
+                command=lambda target=folder: self._select_queued_folder(target),
             )
-            btn.pack(side=tk.LEFT, padx=(0, 8))
-            self.shortcut_buttons[folder_key] = btn
+            btn.pack(side=tk.LEFT, padx=(0, 8), pady=3)
+            self.queue_buttons[key] = btn
 
         self.browse_btn = RoundedButton(
-            btn_row,
-            text="📂 Browse Other Folder...",
-            width=190,
+            self.queue_container,
+            text="📂 Browse / Add Folder...",
+            width=185,
             height=36,
             corner_radius=10,
             bg_color=self.PILL_BROWSE_BG,
@@ -1395,7 +1479,94 @@ class FriendlyFileOrganizerApp:
             canvas_bg=self.BG_CARD,
             command=self._browse_custom_folder,
         )
-        self.browse_btn.pack(side=tk.LEFT)
+        self.browse_btn.pack(side=tk.LEFT, padx=(0, 4), pady=3)
+
+    # ==========================================================================
+    # RESPONSIVE UI CONSTRUCTION (GRID WEIGHTS & DYNAMIC WRAPLENGTH)
+    # ==========================================================================
+
+    def _create_card(
+        self, parent: tk.Widget, row: int, pady: tuple = (0, 10), sticky: str = "ew"
+    ) -> tk.Frame:
+        """Create a crisp white panel card placed in the responsive grid."""
+        card = tk.Frame(
+            parent,
+            bg=self.BG_CARD,
+            highlightbackground=self.BORDER_CARD,
+            highlightthickness=1,
+            padx=20,
+            pady=14,
+        )
+        card.grid(row=row, column=0, sticky=sticky, pady=pady)
+        card.columnconfigure(0, weight=1)
+        return card
+
+    def _build_ui(self) -> None:
+        """
+        Build the responsive 3-step visual interface using Tkinter grid weights
+        so cards scale horizontally and the bottom log expands vertically.
+        """
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+
+        self.main_column = tk.Frame(self.root, bg=self.BG_WINDOW, padx=26, pady=14)
+        self.main_column.grid(row=0, column=0, sticky="nsew")
+        self.main_column.columnconfigure(0, weight=1)
+        # Row 5 (details drawer) expands vertically when window is resized/maximized
+        self.main_column.rowconfigure(5, weight=1)
+
+        # --- Row 0: App Header ---
+        header = tk.Frame(self.main_column, bg=self.BG_WINDOW)
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        header.columnconfigure(0, weight=1)
+
+        tk.Label(
+            header,
+            text="Easy File Organizer",
+            font=(UI_FONT, 16, "bold"),
+            fg=self.TEXT_PRIMARY,
+            bg=self.BG_WINDOW,
+            anchor="w",
+        ).grid(row=0, column=0, sticky="ew")
+
+        os_label = "macOS" if CURRENT_OS == "Darwin" else CURRENT_OS
+        sub_text = (
+            f"Smart Priority Queue ({os_label}) — Messiest folders automatically come first."
+        )
+        if self.running_elevated:
+            priv_name = "Administrator" if CURRENT_OS == "Windows" else "root"
+            sub_text += f"  •  🛡️ Running as {priv_name} (standard user recommended)."
+
+        tk.Label(
+            header,
+            text=sub_text,
+            font=(UI_FONT, 9),
+            fg=self.TEXT_SECONDARY,
+            bg=self.BG_WINDOW,
+            anchor="w",
+        ).grid(row=1, column=0, sticky="ew", pady=(1, 0))
+
+        # ======================================================================
+        # ROW 1 — STEP 1: DYNAMIC MESSY FOLDERS QUEUE
+        # ======================================================================
+        step1_card = self._create_card(self.main_column, row=1)
+
+        step1_header = tk.Frame(step1_card, bg=self.BG_CARD)
+        step1_header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        step1_header.columnconfigure(0, weight=1)
+
+        tk.Label(
+            step1_header,
+            text="Step 1: Where are your messy files? (Auto-prioritized by messiness)",
+            font=(UI_FONT, 11, "bold"),
+            fg=self.TEXT_PRIMARY,
+            bg=self.BG_CARD,
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w")
+
+        # Dynamic folder queue container
+        self.queue_container = tk.Frame(step1_card, bg=self.BG_CARD)
+        self.queue_container.grid(row=1, column=0, sticky="ew", pady=(0, 8))
 
         self.current_folder_label = tk.Label(
             step1_card,
@@ -1405,15 +1576,16 @@ class FriendlyFileOrganizerApp:
             bg=self.BG_CARD,
             anchor="w",
         )
-        self.current_folder_label.pack(fill=tk.X)
+        self.current_folder_label.grid(row=2, column=0, sticky="ew")
 
         # ======================================================================
-        # STEP 2: SAFE PREVIEW & VISUAL CATEGORY SUMMARY CARDS
+        # ROW 2 — STEP 2: SAFE PREVIEW & VISUAL CATEGORY SUMMARY CARDS
         # ======================================================================
-        step2_card = self._create_card(self.main_column)
+        step2_card = self._create_card(self.main_column, row=2)
 
         step2_top = tk.Frame(step2_card, bg=self.BG_CARD)
-        step2_top.pack(fill=tk.X, pady=(0, 6))
+        step2_top.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        step2_top.columnconfigure(0, weight=1)
 
         tk.Label(
             step2_top,
@@ -1422,7 +1594,7 @@ class FriendlyFileOrganizerApp:
             fg=self.TEXT_PRIMARY,
             bg=self.BG_CARD,
             anchor="w",
-        ).pack(side=tk.LEFT)
+        ).grid(row=0, column=0, sticky="w")
 
         self.preview_btn = RoundedButton(
             step2_top,
@@ -1437,7 +1609,7 @@ class FriendlyFileOrganizerApp:
             canvas_bg=self.BG_CARD,
             command=self._run_safe_preview,
         )
-        self.preview_btn.pack(side=tk.RIGHT)
+        self.preview_btn.grid(row=0, column=1, sticky="e")
 
         self.preview_summary_label = tk.Label(
             step2_card,
@@ -1445,19 +1617,19 @@ class FriendlyFileOrganizerApp:
             font=(UI_FONT, 10),
             fg=self.TEXT_SECONDARY,
             bg=self.BG_CARD,
-            wraplength=600,
+            wraplength=760,
             justify=tk.LEFT,
             anchor="w",
         )
-        self.preview_summary_label.pack(fill=tk.X, pady=(0, 8))
+        self.preview_summary_label.grid(row=1, column=0, sticky="ew", pady=(0, 8))
 
         self.badges_container = tk.Frame(step2_card, bg=self.BG_CARD)
-        self.badges_container.pack(fill=tk.X)
+        self.badges_container.grid(row=2, column=0, sticky="ew")
 
         # ======================================================================
-        # STEP 3: ORGANIZE, UNDO & LIVE AUTO-SORT WATCHER
+        # ROW 3 — STEP 3: ORGANIZE, UNDO & LIVE AUTO-SORT WATCHER
         # ======================================================================
-        step3_card = self._create_card(self.main_column, pady=(0, 6))
+        step3_card = self._create_card(self.main_column, row=3, pady=(0, 6))
 
         tk.Label(
             step3_card,
@@ -1466,11 +1638,10 @@ class FriendlyFileOrganizerApp:
             fg=self.TEXT_PRIMARY,
             bg=self.BG_CARD,
             anchor="w",
-        ).pack(fill=tk.X, pady=(0, 8))
+        ).grid(row=0, column=0, sticky="ew", pady=(0, 8))
 
-        # Centered button group: [✨ Organize My Files] + [↩ Undo Last Organize]
         action_outer = tk.Frame(step3_card, bg=self.BG_CARD)
-        action_outer.pack(fill=tk.X, pady=(0, 8))
+        action_outer.grid(row=1, column=0, sticky="ew", pady=(0, 8))
 
         action_group = tk.Frame(action_outer, bg=self.BG_CARD)
         action_group.pack(anchor=tk.CENTER)
@@ -1501,12 +1672,11 @@ class FriendlyFileOrganizerApp:
             fg_color="#FFFFFF",
             font=(UI_FONT, 10, "bold"),
             canvas_bg=self.BG_CARD,
-            enabled=False,  # Disabled by default until a sort operation occurs
+            enabled=False,
             command=self._run_undo_last_organize,
         )
         self.undo_btn.pack(side=tk.LEFT)
 
-        # Feature 3: Auto-Sort Live Watcher Toggle & Status Indicator Badge
         watcher_row = tk.Frame(
             step3_card,
             bg="#F8FAFC",
@@ -1515,7 +1685,7 @@ class FriendlyFileOrganizerApp:
             padx=10,
             pady=6,
         )
-        watcher_row.pack(fill=tk.X, pady=(2, 2))
+        watcher_row.grid(row=2, column=0, sticky="ew", pady=(2, 2))
 
         self.auto_sort_checkbox = tk.Checkbutton(
             watcher_row,
@@ -1542,9 +1712,9 @@ class FriendlyFileOrganizerApp:
             pady=2,
         )
 
-        # Celebration / Undo / Status Banner
         self.banner_frame = tk.Frame(step3_card, bg=self.BG_CARD)
-        self.banner_frame.pack(fill=tk.X, pady=(4, 0))
+        self.banner_frame.grid(row=3, column=0, sticky="ew", pady=(4, 0))
+        self.banner_frame.columnconfigure(0, weight=1)
 
         self.status_banner = tk.Label(
             self.banner_frame,
@@ -1554,7 +1724,7 @@ class FriendlyFileOrganizerApp:
             fg=self.TEXT_SECONDARY,
             padx=12,
             pady=7,
-            wraplength=580,
+            wraplength=740,
             justify=tk.CENTER,
         )
 
@@ -1564,15 +1734,15 @@ class FriendlyFileOrganizerApp:
             font=(UI_FONT, 9, "bold"),
             bg=self.BG_CARD,
             fg="#B45309",
-            wraplength=580,
+            wraplength=740,
             justify=tk.CENTER,
         )
 
         # ======================================================================
-        # COLLAPSIBLE ADVANCED FILE DETAILS TOGGLE (CLOSED BY DEFAULT)
+        # ROW 4 & 5 — COLLAPSIBLE / EXPANDABLE ACTIVITY DETAILS VIEW
         # ======================================================================
         advanced_bar = tk.Frame(self.main_column, bg=self.BG_WINDOW)
-        advanced_bar.pack(fill=tk.X, pady=(2, 4))
+        advanced_bar.grid(row=4, column=0, sticky="ew", pady=(2, 4))
 
         self.toggle_details_btn = tk.Label(
             advanced_bar,
@@ -1594,6 +1764,8 @@ class FriendlyFileOrganizerApp:
             padx=10,
             pady=8,
         )
+        self.details_drawer.columnconfigure(0, weight=1)
+        self.details_drawer.rowconfigure(0, weight=1)
 
         self.status_box = tk.Text(
             self.details_drawer,
@@ -1612,8 +1784,19 @@ class FriendlyFileOrganizerApp:
         )
         self.status_box.configure(yscrollcommand=scrollbar.set)
 
-        self.status_box.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.status_box.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        # Bind responsive wraplength adjustment when window is resized
+        self.main_column.bind("<Configure>", self._on_main_column_resize)
+
+    def _on_main_column_resize(self, event) -> None:
+        """Dynamically adjust label wraplengths when the user resizes the window."""
+        if event.width > 200:
+            new_wrap = max(400, event.width - 96)
+            self.preview_summary_label.configure(wraplength=new_wrap)
+            self.status_banner.configure(wraplength=new_wrap)
+            self.warning_label.configure(wraplength=new_wrap)
 
     # ==========================================================================
     # VISUAL CATEGORY BADGE RENDERING & ADVANCED TOGGLE
@@ -1696,7 +1879,7 @@ class FriendlyFileOrganizerApp:
     ) -> None:
         """Display or hide the friendly celebration / restoration banner in Step 3."""
         if not text:
-            self.status_banner.pack_forget()
+            self.status_banner.grid_forget()
         else:
             if is_success:
                 self.status_banner.configure(
@@ -1714,7 +1897,7 @@ class FriendlyFileOrganizerApp:
                     highlightbackground="#BFDBFE",
                     highlightthickness=1,
                 )
-            self.status_banner.pack(fill=tk.X, pady=(4, 2))
+            self.status_banner.grid(row=0, column=0, sticky="ew", pady=(4, 2))
 
         if warnings:
             shown = warnings[:3]
@@ -1723,9 +1906,9 @@ class FriendlyFileOrganizerApp:
                     f"...and {len(warnings) - 3} more skipped items (see advanced details)."
                 )
             self.warning_label.configure(text="\n".join(f"⚠️ {w}" for w in shown))
-            self.warning_label.pack(fill=tk.X, pady=(2, 0))
+            self.warning_label.grid(row=1, column=0, sticky="ew", pady=(2, 0))
         else:
-            self.warning_label.pack_forget()
+            self.warning_label.grid_forget()
 
     def _toggle_advanced_details(self, _event=None) -> None:
         """Open or close the collapsible individual file details box."""
@@ -1734,14 +1917,18 @@ class FriendlyFileOrganizerApp:
             self.toggle_details_btn.configure(
                 text="▾ Hide individual file details (advanced)"
             )
-            self.details_drawer.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
-            self._set_window_height(self.WINDOW_HEIGHT_EXPANDED)
+            self.details_drawer.grid(row=5, column=0, sticky="nsew", pady=(2, 0))
+            # If window height is compact, expand slightly to show the log comfortably
+            self.root.update_idletasks()
+            cur_w = self.root.winfo_width()
+            cur_h = self.root.winfo_height()
+            if cur_h < 780:
+                self.root.geometry(f"{cur_w}x790")
         else:
             self.toggle_details_btn.configure(
                 text="▸ Show individual file details (advanced)"
             )
-            self.details_drawer.pack_forget()
-            self._set_window_height(self.WINDOW_HEIGHT_COLLAPSED)
+            self.details_drawer.grid_forget()
 
     def _set_advanced_details(self, lines: List[str]) -> None:
         """Populate the hidden-by-default advanced file list."""
@@ -1755,11 +1942,14 @@ class FriendlyFileOrganizerApp:
         self.status_box.configure(state=tk.DISABLED)
 
     # ==========================================================================
-    # STEP 1: FOLDER SELECTION HANDLERS
+    # STEP 1: FOLDER QUEUE SELECTION & CUSTOM FOLDER ADDITION
     # ==========================================================================
 
-    def _try_set_target_folder(self, candidate: Path, shortcut_name: str = "") -> bool:
-        """Validate `candidate` against the OS system path blacklist before setting."""
+    def _try_set_target_folder(self, candidate: Path, add_to_queue: bool = True) -> bool:
+        """
+        Validate `candidate` against the OS system path blacklist, add it to the
+        dynamic candidate queue if new, re-rank, and focus `candidate`.
+        """
         is_blocked, _reason = is_protected_system_path(candidate)
         if is_blocked:
             messagebox.showerror(
@@ -1769,20 +1959,23 @@ class FriendlyFileOrganizerApp:
             )
             return False
 
-        self.active_shortcut = shortcut_name
+        if add_to_queue:
+            self._add_candidate_folder_internal(candidate)
+
         self.current_folder = candidate
         self._watched_file_states.clear()
+        self._recalculate_folder_rankings()
+        self._refresh_folder_queue_ui()
         self._update_folder_display()
         self._update_watcher_badge()
         return True
 
-    def _select_shortcut_folder(self, folder_name: str) -> None:
-        """Handle clicking [Downloads], [Desktop], or [Documents]."""
-        candidate = resolve_user_folder(folder_name)
-        self._try_set_target_folder(candidate, shortcut_name=folder_name)
+    def _select_queued_folder(self, folder: Path) -> None:
+        """Handle clicking any folder button in the dynamic queue."""
+        self._try_set_target_folder(folder, add_to_queue=False)
 
     def _browse_custom_folder(self) -> None:
-        """Handle clicking [Browse Other Folder...] with immediate security validation."""
+        """Handle clicking [📂 Browse / Add Folder...] to queue a custom directory."""
         initial = (
             str(self.current_folder)
             if self.current_folder.exists()
@@ -1791,37 +1984,32 @@ class FriendlyFileOrganizerApp:
         chosen = filedialog.askdirectory(
             parent=self.root,
             initialdir=initial,
-            title="Choose a Folder to Organize",
+            title="Choose a Folder to Add & Organize",
         )
         if chosen:
-            self._try_set_target_folder(Path(chosen), shortcut_name="")
+            self._try_set_target_folder(Path(chosen), add_to_queue=True)
 
     def _update_folder_display(self) -> None:
-        """Update Step 1 button highlights, folder label, and refresh Step 2 badges."""
-        for name, btn in self.shortcut_buttons.items():
-            if name == self.active_shortcut:
-                btn.set_colors(
-                    self.PILL_ACTIVE_BG,
-                    self.PILL_ACTIVE_HOVER,
-                    self.PILL_ACTIVE_FG,
-                )
-            else:
-                btn.set_colors(
-                    self.PILL_INACTIVE_BG,
-                    self.PILL_INACTIVE_HOVER,
-                    self.PILL_INACTIVE_FG,
-                )
-
+        """Update Step 1 active folder label and refresh Step 2 preview badges."""
         friendly_name = self.current_folder.name or str(self.current_folder)
+        cur_count = self.folder_loose_counts.get(
+            self._folder_key(self.current_folder), 0
+        )
+        if cur_count > 0:
+            file_word = "loose file" if cur_count == 1 else "loose files"
+            status_suffix = f" ({cur_count} {file_word} waiting)"
+        else:
+            status_suffix = " (Clean — 0 loose files)"
+
         self.current_folder_label.configure(
-            text=f"Currently organizing: {friendly_name}"
+            text=f"Currently organizing: {friendly_name}{status_suffix}"
         )
 
         self._show_banner("")
         self._run_safe_preview(show_error_modal=False)
 
     # ==========================================================================
-    # STEP 2 (SAFE PREVIEW) & STEP 3 (ORGANIZE + UNDO)
+    # STEP 2 (SAFE PREVIEW) & STEP 3 (ORGANIZE + AUTO-ADVANCE + UNDO)
     # ==========================================================================
 
     def _scan_eligible_files(
@@ -1959,9 +2147,17 @@ class FriendlyFileOrganizerApp:
         self._set_advanced_details(preview_details + security_notes)
 
     def _run_organize_files(self) -> None:
-        """Step 3: Move loose files into neat category subfolders and record Undo transaction."""
+        """
+        Step 3: Move loose files into neat category subfolders, record Undo transaction,
+        demote the cleaned folder in the queue, and automatically advance to the next
+        messiest folder if one exists!
+        """
         with self._op_lock:
-            eligible_items, security_notes, error_msg = self._scan_eligible_files()
+            organized_folder = self.current_folder
+            organized_folder_name = organized_folder.name or str(organized_folder)
+            eligible_items, security_notes, error_msg = self._scan_eligible_files(
+                target_folder=organized_folder
+            )
 
             if error_msg:
                 if error_msg == PROTECTED_FOLDER_MESSAGE:
@@ -1975,6 +2171,8 @@ class FriendlyFileOrganizerApp:
                 return
 
             if not eligible_items:
+                self._recalculate_folder_rankings()
+                self._refresh_folder_queue_ui()
                 self._show_banner(
                     "🎉 All clean! This folder is already neat and tidy.",
                     is_success=True,
@@ -1992,7 +2190,7 @@ class FriendlyFileOrganizerApp:
             for file_path, sanitized_name in eligible_items:
                 try:
                     category = get_category_for_filename(sanitized_name)
-                    category_dir = self.current_folder / category
+                    category_dir = organized_folder / category
                     safe_dest = get_safe_destination_path(
                         category_dir, sanitized_name, reserved_destinations
                     )
@@ -2000,7 +2198,7 @@ class FriendlyFileOrganizerApp:
                     success, warn_msg = atomic_verified_move(
                         source_path=file_path,
                         dest_path=safe_dest,
-                        base_dir=self.current_folder,
+                        base_dir=organized_folder,
                         category_dir=category_dir,
                     )
 
@@ -2033,18 +2231,65 @@ class FriendlyFileOrganizerApp:
                 self.last_transaction = current_transaction
                 self.undo_btn.set_enabled(True)
 
-                banner_text = (
-                    f"🎉 All clean! {moved_count} {file_word} organized successfully."
+                # Re-rank all candidate folders after organizing
+                self._recalculate_folder_rankings()
+                remaining_in_current = self.folder_loose_counts.get(
+                    self._folder_key(organized_folder), 0
                 )
-                self.preview_summary_label.configure(
-                    text=f"Sorted {moved_count} {file_word} into these folders:",
-                    fg=self.TEXT_PRIMARY,
-                    font=(UI_FONT, 10, "bold"),
-                )
-                self._render_category_badges(moved_counts_by_cat)
-                self._show_banner(
-                    banner_text, is_success=True, warnings=skipped_warnings
-                )
+
+                # Auto-Demotion & Progression: if current folder reached 0 loose files
+                # and another queued folder still has loose files, transition to it!
+                next_messy_folder: Optional[Path] = None
+                if remaining_in_current == 0 and self.ranked_folders:
+                    top_candidate = self.ranked_folders[0]
+                    top_count = self.folder_loose_counts.get(
+                        self._folder_key(top_candidate), 0
+                    )
+                    if (
+                        top_count > 0
+                        and self._folder_key(top_candidate)
+                        != self._folder_key(organized_folder)
+                    ):
+                        next_messy_folder = top_candidate
+
+                if next_messy_folder is not None:
+                    next_name = next_messy_folder.name or str(next_messy_folder)
+                    next_count = self.folder_loose_counts.get(
+                        self._folder_key(next_messy_folder), 0
+                    )
+                    self.current_folder = next_messy_folder
+                    self._watched_file_states.clear()
+                    self._refresh_folder_queue_ui()
+                    self._update_folder_display()
+                    self._update_watcher_badge()
+
+                    banner_text = (
+                        f"🎉 All clean! {moved_count} {file_word} organized successfully in {organized_folder_name}. "
+                        f"Switched to next messy folder: {next_name} ({next_count})."
+                    )
+                    self._show_banner(
+                        banner_text, is_success=True, warnings=skipped_warnings
+                    )
+                else:
+                    self._refresh_folder_queue_ui()
+                    friendly_name = self.current_folder.name or str(self.current_folder)
+                    self.current_folder_label.configure(
+                        text=f"Currently organizing: {friendly_name} (Clean — 0 loose files)"
+                        if remaining_in_current == 0
+                        else f"Currently organizing: {friendly_name} ({remaining_in_current} loose files waiting)"
+                    )
+                    banner_text = (
+                        f"🎉 All clean! {moved_count} {file_word} organized successfully."
+                    )
+                    self.preview_summary_label.configure(
+                        text=f"Sorted {moved_count} {file_word} into these folders:",
+                        fg=self.TEXT_PRIMARY,
+                        font=(UI_FONT, 10, "bold"),
+                    )
+                    self._render_category_badges(moved_counts_by_cat)
+                    self._show_banner(
+                        banner_text, is_success=True, warnings=skipped_warnings
+                    )
             else:
                 self._show_banner(
                     "No files were moved because they are currently open or protected.",
@@ -2056,9 +2301,8 @@ class FriendlyFileOrganizerApp:
 
     def _run_undo_last_organize(self) -> None:
         """
-        Feature 2 ("Undo Last Organize"):
         Safely reverse `self.last_transaction`, moving sorted files back to their
-        original locations while handling any filename conflicts gracefully.
+        original locations, re-ranking the folder queue, and focusing the restored folder.
         """
         with self._op_lock:
             if not self.last_transaction:
@@ -2070,10 +2314,12 @@ class FriendlyFileOrganizerApp:
             restore_details: List[str] = []
             restore_warnings: List[str] = []
             remaining_transaction: List[Tuple[Path, Path]] = []
+            restored_folder: Optional[Path] = None
 
             for moved_dest_path, original_source_path in reversed(self.last_transaction):
                 try:
                     base_dir = original_source_path.parent
+                    restored_folder = base_dir
                     is_blocked, _ = is_protected_system_path(base_dir)
                     if is_blocked:
                         restore_warnings.append(
@@ -2088,7 +2334,6 @@ class FriendlyFileOrganizerApp:
                         clean_orig_name if is_safe else moved_dest_path.name
                     )
 
-                    # Resolve any conflict at the original location without overwriting
                     safe_restore_path = get_safe_destination_path(
                         base_dir, target_name, reserved_restore_paths
                     )
@@ -2130,8 +2375,13 @@ class FriendlyFileOrganizerApp:
             self.last_transaction = list(reversed(remaining_transaction))
             self.undo_btn.set_enabled(bool(self.last_transaction))
 
-            # Refresh Step 2 category preview badges to show the restored loose files
-            self._run_safe_preview(show_error_modal=False)
+            if restored_folder is not None:
+                self.current_folder = restored_folder
+
+            self._recalculate_folder_rankings()
+            self._refresh_folder_queue_ui()
+            self._update_folder_display()
+            self._update_watcher_badge()
 
             spot_word = (
                 "file back to its original spot"
@@ -2190,9 +2440,6 @@ class FriendlyFileOrganizerApp:
         """
         Background daemon thread that monitors `self.current_folder` while
         `self._auto_sort_enabled` is True.
-        Never touches Tkinter widgets directly; waits until newly detected files
-        have stable size and mtime across `WATCHER_STABILITY_WINDOW_SEC` before
-        sorting them under `self._op_lock`.
         """
         while not self._watcher_stop_event.is_set():
             time.sleep(WATCHER_POLL_INTERVAL_SEC)
@@ -2233,14 +2480,12 @@ class FriendlyFileOrganizerApp:
                         if (now - stable_since) >= WATCHER_STABILITY_WINDOW_SEC:
                             ready_to_sort.append((file_path, sanitized_name))
                     else:
-                        # File is still being written/downloaded; reset stability timer
                         self._watched_file_states[file_path] = (
                             cur_size,
                             cur_mtime,
                             now,
                         )
 
-            # Prune files that disappeared or were already moved
             for tracked in list(self._watched_file_states.keys()):
                 if tracked not in current_paths:
                     self._watched_file_states.pop(tracked, None)
@@ -2297,7 +2542,7 @@ class FriendlyFileOrganizerApp:
     def _poll_watcher_ui_updates(self) -> None:
         """
         Periodic main-thread callback that drains `self._pending_auto_sorted`
-        and updates the Undo button, category badges, and banner safely.
+        and updates the folder queue rankings, Undo button, badges, and banner.
         """
         if self._watcher_stop_event.is_set():
             return
@@ -2315,7 +2560,9 @@ class FriendlyFileOrganizerApp:
                 ]
                 self.last_transaction.extend(batch_tx)
                 self.undo_btn.set_enabled(True)
-                self._run_safe_preview(show_error_modal=False)
+                self._recalculate_folder_rankings()
+                self._refresh_folder_queue_ui()
+                self._update_folder_display()
 
                 count = len(drained)
                 file_word = "file" if count == 1 else "files"
