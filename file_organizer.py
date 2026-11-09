@@ -540,6 +540,10 @@ def is_protected_system_path(
             "/srv",
             "/snap",
         ]
+        if home is not None:
+            for hidden_crit in (".ssh", ".gnupg", ".config", ".local"):
+                linux_trees.append(str(home / hidden_crit).replace("\\", "/"))
+
         for tree in linux_trees:
             norm_tree = _normalize_path_str(tree, "Linux")
             if _is_subpath_or_equal(norm_target, norm_tree, "/"):
@@ -860,8 +864,22 @@ def get_category_for_filename(sanitized_filename: str) -> str:
     return EXTENSION_TO_CATEGORY.get(ext, DEFAULT_CATEGORY)
 
 
+def _split_stem_and_suffix(filename: str) -> Tuple[str, str]:
+    """
+    Split a filename into (stem, suffix), preserving compound archive extensions
+    such as '.tar.gz', '.tar.bz2', and '.tar.xz'.
+    """
+    lower = filename.lower()
+    for compound in (".tar.gz", ".tar.bz2", ".tar.xz"):
+        if lower.endswith(compound) and len(filename) > len(compound):
+            cut = len(filename) - len(compound)
+            return filename[:cut], filename[cut:]
+    p = Path(filename)
+    return p.stem, p.suffix
+
+
 def get_safe_destination_path(
-    target_dir: Path, sanitized_filename: str, reserved_paths: Set[Path]
+    target_dir: Path, sanitized_filename: str, reserved_paths: Set[str]
 ) -> Path:
     """
     Guarantee no file is ever overwritten.
@@ -869,17 +887,18 @@ def get_safe_destination_path(
     'photo (2).png', etc.
     """
     candidate = target_dir / sanitized_filename
-    if not candidate.exists() and candidate not in reserved_paths:
+    norm_cand = os.path.normcase(str(candidate))
+    if not candidate.exists() and norm_cand not in reserved_paths:
         return candidate
 
-    stem = Path(sanitized_filename).stem
-    suffix = Path(sanitized_filename).suffix
+    stem, suffix = _split_stem_and_suffix(sanitized_filename)
     counter = 1
 
     while True:
         new_name = f"{stem} ({counter}){suffix}"
         candidate = target_dir / new_name
-        if not candidate.exists() and candidate not in reserved_paths:
+        norm_cand = os.path.normcase(str(candidate))
+        if not candidate.exists() and norm_cand not in reserved_paths:
             return candidate
         counter += 1
 
@@ -1565,7 +1584,7 @@ class FriendlyFileOrganizerApp:
         )
 
         self._show_banner("")
-        self._run_safe_preview()
+        self._run_safe_preview(show_error_modal=False)
 
     # ==========================================================================
     # STEP 2 (SAFE PREVIEW) & STEP 3 (ORGANIZE MY FILES)
@@ -1646,24 +1665,33 @@ class FriendlyFileOrganizerApp:
 
         return eligible_items, security_notes, ""
 
-    def _run_safe_preview(self) -> None:
+    def _run_safe_preview(self, show_error_modal: bool = True) -> None:
         """Step 2: Populate the visual category summary badges without moving anything."""
         eligible_items, security_notes, error_msg = self._scan_eligible_files()
 
         if error_msg:
-            if error_msg == PROTECTED_FOLDER_MESSAGE:
-                messagebox.showerror(
-                    "Protected System Folder", error_msg, parent=self.root
-                )
+            if show_error_modal:
+                if error_msg == PROTECTED_FOLDER_MESSAGE:
+                    messagebox.showerror(
+                        "Protected System Folder", error_msg, parent=self.root
+                    )
+                else:
+                    messagebox.showwarning(
+                        "Cannot Open Folder", error_msg, parent=self.root
+                    )
             else:
-                messagebox.showwarning(
-                    "Cannot Open Folder", error_msg, parent=self.root
+                self.preview_summary_label.configure(
+                    text=error_msg,
+                    fg=self.TEXT_SECONDARY,
+                    font=(UI_FONT, 10),
                 )
+                self._render_category_badges({})
+                self._set_advanced_details([])
             return
 
         category_counts: Dict[str, int] = {}
         preview_details: List[str] = []
-        reserved_destinations: Set[Path] = set()
+        reserved_destinations: Set[str] = set()
 
         for file_path, sanitized_name in eligible_items:
             category = get_category_for_filename(sanitized_name)
@@ -1678,7 +1706,7 @@ class FriendlyFileOrganizerApp:
                 )
                 continue
 
-            reserved_destinations.add(safe_dest)
+            reserved_destinations.add(os.path.normcase(str(safe_dest)))
             category_counts[category] = category_counts.get(category, 0) + 1
 
             if safe_dest.name != file_path.name:
@@ -1725,7 +1753,7 @@ class FriendlyFileOrganizerApp:
 
         moved_count = 0
         moved_counts_by_cat: Dict[str, int] = {}
-        reserved_destinations: Set[Path] = set()
+        reserved_destinations: Set[str] = set()
         moved_details: List[str] = []
         skipped_warnings: List[str] = list(security_notes)
 
@@ -1745,7 +1773,7 @@ class FriendlyFileOrganizerApp:
                 )
 
                 if success:
-                    reserved_destinations.add(safe_dest)
+                    reserved_destinations.add(os.path.normcase(str(safe_dest)))
                     moved_count += 1
                     moved_counts_by_cat[category] = (
                         moved_counts_by_cat.get(category, 0) + 1
