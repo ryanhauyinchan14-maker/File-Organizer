@@ -17,7 +17,12 @@ Messy folders like `Downloads` or `Desktop` quickly fill up with hundreds of loo
 - **Simple 3-Step Visual Interface**:
   1. **Step 1 — Where are your messy files?**: One-click rounded buttons for **Downloads**, **Desktop**, and **Documents**, plus a **Browse Other Folder...** button.
   2. **Step 2 — Safe Preview**: Displays clean 2-column visual category badges (`📷 Photos & Images`, `📄 Documents`, `📦 Zip Files`, `⚙️ Installers`, `🎬 Videos`, `🎵 Music & Audio`, `💻 Code & Scripts`, `📁 Other Files`) and a plain-English summary before moving a single file. Includes an optional collapsible drawer (`Show individual file details`) that stays closed by default.
-  3. **Step 3 — Organize**: A centered **Organize My Files** button and a celebratory completion banner (`🎉 All clean!`).
+  3. **Step 3 — Organize, Undo & Live Auto-Sort**:
+     - **Organize My Files**: One-click sorting with a celebratory completion banner (`🎉 All clean!`).
+     - **Undo Last Organize**: Reverses the previous batch of sorted files back to their original locations (`Restored X files back to their original spots.`), gracefully resolving any name conflicts without overwriting.
+     - **Live Auto-Sort Watcher**: Optional background watcher (`Auto-sort new files as they arrive`) with a live status badge (`🟢 Live auto-sorting is active for [Folder]`) that ignores partial downloads (`.crdownload`, `.part`, `.tmp`, `~$*`) and waits for file size stability before moving new files.
+- **Custom Standalone App & Taskbar Icon**:
+  - Generates a crisp, modern folder-organizer PNG icon in memory using only Python's standard library (`zlib`, `struct`, `base64`) and registers a dedicated Windows `AppUserModelID` so both the title bar and Windows taskbar show the custom icon.
 - **Non-Destructive Duplicate Handling**:
   - Never overwrites existing files. If `report.pdf` or `backup.tar.gz` already exists in the destination subfolder, the incoming file is automatically renamed to `report (1).pdf` or `backup (1).tar.gz`.
 - **Full Cross-Platform Support (Windows, macOS, Linux)**:

@@ -5,61 +5,174 @@ A modern, compact, beginner-friendly desktop utility for Windows, macOS, and Lin
 that sorts loose files into neat category subfolders in 3 simple steps, backed by
 enterprise-grade defensive programming and OS-aware security controls.
 
-Cross-Platform & Security Controls Implemented:
-1. Dynamic OS Detection & Path Resolution:
-   - Uses `platform.system()` to adapt to Windows, macOS ("Darwin"), and Linux.
-   - Resolves Downloads, Desktop, and Documents across Windows (including OneDrive
-     redirection), macOS (`~/Downloads`, etc.), and Linux (`XDG_CONFIG_HOME` /
-     `~/.config/user-dirs.dirs` with `~/Downloads` fallback).
-2. OS-Specific Blacklisted System Directories:
-   - Windows: Blocks root drives (`C:\\`, `D:\\`), `C:\\Windows`, `System32`, `SysWOW64`,
-     `WinSxS`, `Program Files`, `Program Files (x86)`, `C:\\Users`, and root `AppData`.
-   - macOS: Blocks `/`, `/System`, `/Library`, `/Applications`, `/private`, `/usr`,
-     `/bin`, `/sbin`, `/Users`, and user `~/Library`.
-   - Linux: Blocks `/`, `/boot`, `/etc`, `/sys`, `/proc`, `/dev`, `/usr`, `/bin`,
-     `/sbin`, `/var`, `/root`, and `/home`.
-   - All OSes: Blocks organizing the root user home directory itself (`Path.home()`).
-3. Platform-Specific System & Hidden File Filtering:
-   - Cross-platform: Dotfiles (`.`), Office lock files (`~$*`), incomplete downloads.
-   - Windows: `desktop.ini`, `thumbs.db`, hidden/system file attributes.
-   - macOS: `.DS_Store`, AppleDouble (`._*`), `.localized`, `.Trashes`, `.Spotlight-V100`,
-     `Icon\\r`, and BSD `UF_HIDDEN` flag.
-   - Linux: Editor swap/backup files (`*.swp`, `*.swo`, `*~`, `#*#`), `.directory`.
-4. Cross-Platform Privilege & Non-Destructive File Permission Handling:
-   - Detects Administrator (`ctypes.windll.shell32.IsUserAnAdmin()`) on Windows and
-     `root` (`os.geteuid() == 0`) on macOS/Linux.
-   - Checks POSIX write permissions (`os.access(..., os.W_OK)`) before moving.
-   - Enforces path containment, symlink/junction defense, TOCTOU inode/size checks,
-     and a strict zero-deletion guarantee.
+Features & Security Controls Implemented:
+1. Custom Embedded App & Taskbar Icon:
+   - Generates a crisp, self-contained PNG folder/organizer icon in memory using
+     only standard library (`zlib`, `struct`, `base64`)—zero external icon files.
+   - Registers a dedicated Windows AppUserModelID via
+     `ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID` so both the
+     window title bar and Windows taskbar display the custom icon.
+2. "Undo Last Organize" Transaction System:
+   - Records every file move in a transaction log (`last_transaction`).
+   - Provides an `[↩ Undo Last Organize]` button that safely restores the previous
+     batch of sorted files back to their original locations, handling any name
+     conflicts non-destructively without overwriting.
+3. "Auto-Sort" Background Watcher (Live Watcher):
+   - Optional background daemon thread (`threading.Thread(daemon=True)`) that
+     monitors the selected folder for newly added files.
+   - Enforces download safety: ignores active temp/partial files (`.crdownload`,
+     `.part`, `.tmp`, `~$*`) and waits for file size & modification time stability
+     across a multi-second window before moving.
+4. Cross-Platform & Enterprise Security Hardening:
+   - Dynamic OS detection (`platform.system()`) for Windows, macOS, and Linux (XDG).
+   - OS-specific system folder blacklists (blocks root drives, OS trees, and `Path.home()`).
+   - Path containment (`os.path.commonpath`), symlink/junction defense (`os.lstat`),
+     Unicode RLO (`\\u202E`) stripping, ADS (`:`) blocking, and Reserved Device Name filtering.
+   - Strict zero-deletion and zero-overwrite guarantee.
 
-Uses only the Python standard library: ctypes, os, pathlib, platform, shutil, stat, tkinter, typing.
+Uses only the Python standard library:
+base64, ctypes, os, pathlib, platform, shutil, stat, struct, threading, time, tkinter, typing, zlib.
 """
 
+import base64
 import ctypes
 import os
 from pathlib import Path
 import platform
 import shutil
 import stat
+import struct
+import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Dict, List, Optional, Set, Tuple
+import zlib
 
 
 # ==============================================================================
-# 1. OPERATING SYSTEM DETECTION & NATIVE TYPOGRAPHY
+# 1. OPERATING SYSTEM DETECTION, APP ID & EMBEDDED ICON GENERATOR
 # ==============================================================================
 
-# Detect host operating system: "Windows", "Darwin" (macOS), or "Linux"
 CURRENT_OS: str = platform.system()
 
-# Select clean native UI font per platform
 if CURRENT_OS == "Windows":
     UI_FONT: str = "Segoe UI"
 elif CURRENT_OS == "Darwin":
     UI_FONT = "Helvetica Neue"
 else:
     UI_FONT = "DejaVu Sans"
+
+APP_USER_MODEL_ID: str = "EasyFileOrganizer.Desktop.Utility.2"
+
+
+def set_windows_app_user_model_id() -> None:
+    """
+    Register an explicit Windows AppUserModelID so the Windows 10/11 taskbar
+    displays our custom organizer icon instead of the default Python logo.
+    """
+    if CURRENT_OS == "Windows":
+        try:
+            if hasattr(ctypes, "windll") and hasattr(ctypes.windll, "shell32"):
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                    APP_USER_MODEL_ID
+                )
+        except (OSError, AttributeError, ValueError):
+            pass
+
+
+def build_embedded_icon_png_base64(size: int = 64) -> str:
+    """
+    Generate a crisp, modern folder-organizer PNG icon in memory using only
+    `struct`, `zlib`, and `base64` (100% standalone, no external image files).
+    Draws a sleek rounded blue folder with a white document sheet and green badge.
+    """
+    rows: List[bytes] = []
+    scale = size / 64.0
+
+    for y in range(size):
+        row = bytearray([0])  # PNG filter type 0 (None)
+        fy = y / scale
+        for x in range(size):
+            fx = x / scale
+            r, g, b, a = 0, 0, 0, 0
+
+            # 1. Folder back tab (top-left rounded shape)
+            in_tab = (8 <= fx <= 28) and (10 <= fy <= 20)
+            # 2. Folder main body
+            in_back = (6 <= fx <= 58) and (16 <= fy <= 54)
+            # 3. White document card peeking out of the folder
+            in_doc = (16 <= fx <= 48) and (13 <= fy <= 32)
+            # 4. Front folder pocket flap
+            in_flap = (6 <= fx <= 58) and (25 <= fy <= 54)
+
+            if in_tab or in_back:
+                # Deep cobalt folder back (#1D4ED8)
+                r, g, b, a = 29, 78, 216, 255
+
+            if in_doc:
+                # Crisp white document (#FFFFFF) with subtle blue lines
+                if (22 <= fx <= 42) and (int(fy) in (18, 22)):
+                    r, g, b, a = 147, 197, 253, 255
+                else:
+                    r, g, b, a = 255, 255, 255, 255
+
+            if in_flap:
+                # Bright modern blue folder front (#3B82F6 -> #2563EB gradient)
+                shade = int((fy - 25) * 0.9)
+                r = max(37 - shade // 2, 25)
+                g = max(115 - shade, 85)
+                b = min(246, 235)
+                a = 255
+
+            # 5. Emerald green checkmark / organizer badge in bottom-right corner
+            dx = fx - 46.0
+            dy = fy - 42.0
+            dist_sq = dx * dx + dy * dy
+            if dist_sq <= 121.0:  # Radius 11 badge
+                r, g, b, a = 16, 185, 129, 255  # #10B981 emerald badge
+                # White checkmark inside badge
+                if (
+                    abs((fx - 41) - (fy - 41)) <= 1.8 and 41 <= fx <= 45 and 41 <= fy <= 45
+                ) or (
+                    abs((fx - 45) + (fy - 45)) <= 1.8 and 45 <= fx <= 52 and 38 <= fy <= 45
+                ):
+                    r, g, b, a = 255, 255, 255, 255
+
+            row.extend((r, g, b, a))
+        rows.append(bytes(row))
+
+    raw_data = b"".join(rows)
+
+    def make_chunk(chunk_type: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(chunk_type + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + chunk_type + data + struct.pack(">I", crc)
+
+    ihdr = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)  # 8-bit RGBA
+    idat = zlib.compress(raw_data, level=9)
+    png_bytes = (
+        b"\x89PNG\r\n\x1a\n"
+        + make_chunk(b"IHDR", ihdr)
+        + make_chunk(b"IDAT", idat)
+        + make_chunk(b"IEND", b"")
+    )
+    return base64.b64encode(png_bytes).decode("ascii")
+
+
+def apply_app_icon(root: tk.Tk) -> List[tk.PhotoImage]:
+    """
+    Attach the embedded 64x64 and 32x32 custom icons to the Tk window and
+    return the PhotoImage references so Python's garbage collector keeps them alive.
+    """
+    icons: List[tk.PhotoImage] = []
+    try:
+        icon_64 = tk.PhotoImage(data=build_embedded_icon_png_base64(64))
+        icon_32 = tk.PhotoImage(data=build_embedded_icon_png_base64(32))
+        root.iconphoto(True, icon_64, icon_32)
+        icons.extend([icon_64, icon_32])
+    except tk.TclError:
+        pass
+    return icons
 
 
 # ==============================================================================
@@ -124,7 +237,6 @@ PROTECTED_FOLDER_MESSAGE: str = (
     "Protected System Folder: Organizing this directory is blocked to protect your operating system."
 )
 
-# Cross-platform + OS-specific hidden/system filenames (lowercase)
 WINDOWS_IGNORED_FILENAMES: Set[str] = {
     "desktop.ini",
     "thumbs.db",
@@ -166,6 +278,7 @@ IGNORED_TEMP_EXTENSIONS: Set[str] = {
     ".part",
     ".partial",
     ".download",
+    ".opdownload",
     ".swp",
     ".swo",
     ".swn",
@@ -175,13 +288,11 @@ IGNORED_TEMP_EXTENSIONS: Set[str] = {
     ".desktop",
 }
 
-# Windows File Attribute bitmasks & macOS BSD flags
 FILE_ATTRIBUTE_HIDDEN: int = 0x0002
 FILE_ATTRIBUTE_SYSTEM: int = 0x0004
 FILE_ATTRIBUTE_REPARSE_POINT: int = 0x0400
-UF_HIDDEN: int = 0x8000  # macOS / BSD hidden file flag in st_flags
+UF_HIDDEN: int = 0x8000
 
-# Windows Reserved Device Names (guarded on all platforms for cross-platform safety)
 WINDOWS_RESERVED_NAMES: Set[str] = {
     "CON", "PRN", "AUX", "NUL",
     "CONIN$", "CONOUT$", "CLOCK$",
@@ -189,7 +300,6 @@ WINDOWS_RESERVED_NAMES: Set[str] = {
     *(f"LPT{i}" for i in range(0, 10)),
 }
 
-# Unicode Bidirectional / Spoofing characters used to disguise extensions (e.g., RLO \u202E)
 UNICODE_SPOOFING_CHARS: Set[str] = {
     "\u202e", "\u202d", "\u202a", "\u202b", "\u202c",
     "\u2066", "\u2067", "\u2068", "\u2069",
@@ -197,6 +307,10 @@ UNICODE_SPOOFING_CHARS: Set[str] = {
 }
 
 FORBIDDEN_FILENAME_CHARS: Set[str] = set('<>:"/\\|?*')
+
+# Auto-Sort watcher timing constants (seconds)
+WATCHER_POLL_INTERVAL_SEC: float = 0.6
+WATCHER_STABILITY_WINDOW_SEC: float = 1.5
 
 
 # ==============================================================================
@@ -207,7 +321,6 @@ def _parse_linux_xdg_user_dirs(home: Path) -> Dict[str, Path]:
     """
     Parse Linux XDG user directories from `$XDG_CONFIG_HOME/user-dirs.dirs`
     (defaulting to `~/.config/user-dirs.dirs`).
-    Supports keys: XDG_DOWNLOAD_DIR, XDG_DESKTOP_DIR, XDG_DOCUMENTS_DIR.
     """
     xdg_config_home = os.environ.get("XDG_CONFIG_HOME", "").strip()
     config_dir = Path(xdg_config_home) if xdg_config_home else (home / ".config")
@@ -234,7 +347,6 @@ def _parse_linux_xdg_user_dirs(home: Path) -> Dict[str, Path]:
             if key not in key_map:
                 continue
 
-            # Strip surrounding quotes and expand $HOME / ${HOME}
             cleaned_val = val.strip().strip('"').strip("'")
             cleaned_val = cleaned_val.replace("${HOME}", str(home)).replace(
                 "$HOME", str(home)
@@ -251,12 +363,8 @@ def _parse_linux_xdg_user_dirs(home: Path) -> Dict[str, Path]:
 
 def resolve_user_folder(folder_name: str, current_os: str = CURRENT_OS) -> Path:
     """
-    Specification 1 (Cross-Platform Quick Folders):
-    Reliably resolve 'Downloads', 'Desktop', and 'Documents' across:
-    - Windows: Standard home folder with OneDrive redirection fallback.
-    - macOS ("Darwin"): `Path.home() / folder_name`.
-    - Linux ("Linux"): `XDG_CONFIG_HOME/user-dirs.dirs` (`XDG_DOWNLOAD_DIR`, etc.)
-      with fallback to `Path.home() / folder_name`.
+    Reliably resolve 'Downloads', 'Desktop', and 'Documents' across Windows
+    (including OneDrive redirection), macOS, and Linux (XDG user-dirs).
     """
     home = Path.home()
     direct_path = home / folder_name
@@ -264,7 +372,6 @@ def resolve_user_folder(folder_name: str, current_os: str = CURRENT_OS) -> Path:
     if current_os == "Windows":
         if direct_path.exists():
             return direct_path
-        # Check environment OneDrive variables and ~/OneDrive fallback
         for env_key in ("OneDriveConsumer", "OneDrive", "OneDriveCommercial"):
             env_val = os.environ.get(env_key, "").strip()
             if env_val:
@@ -284,7 +391,6 @@ def resolve_user_folder(folder_name: str, current_os: str = CURRENT_OS) -> Path:
                 return xdg_candidate
         return direct_path
 
-    # macOS ("Darwin") and other POSIX platforms
     return direct_path
 
 
@@ -294,9 +400,8 @@ def resolve_user_folder(folder_name: str, current_os: str = CURRENT_OS) -> Path:
 
 def is_running_with_elevated_privileges(current_os: str = CURRENT_OS) -> bool:
     """
-    Specification 4 (Root / Administrator Detection):
-    - On Windows: Check via `ctypes.windll.shell32.IsUserAnAdmin()`.
-    - On macOS / Linux: Check via `os.geteuid() == 0`.
+    Detect Administrator on Windows (`ctypes.windll.shell32.IsUserAnAdmin()`)
+    and `root` on macOS/Linux (`os.geteuid() == 0`).
     """
     try:
         if current_os == "Windows":
@@ -312,10 +417,8 @@ def is_running_with_elevated_privileges(current_os: str = CURRENT_OS) -> bool:
 
 def is_symlink_or_junction(path: Path) -> bool:
     """
-    Control 3 (Symlink, NTFS Junction Point & Reparse Point Defense):
     Return True if `path` is a symbolic link, NTFS junction point, mount point,
-    or carries the Windows FILE_ATTRIBUTE_REPARSE_POINT bit.
-    Never follows the link target (uses os.lstat).
+    or carries the Windows FILE_ATTRIBUTE_REPARSE_POINT bit. Never follows links.
     """
     try:
         if path.is_symlink():
@@ -359,7 +462,6 @@ def is_protected_system_path(
     target_path: Path, current_os: str = CURRENT_OS
 ) -> Tuple[bool, str]:
     """
-    Specification 2 (OS-Specific Blacklisted System Directories):
     Dynamically enforce system folder blacklists for Windows, macOS, and Linux,
     and prevent organizing the root user home directory on all platforms.
     """
@@ -367,7 +469,6 @@ def is_protected_system_path(
     if not raw_str:
         return True, "Empty directory path."
 
-    # If the path exists on the current host, reject symlinks/junctions immediately
     try:
         if target_path.exists() and is_symlink_or_junction(target_path):
             return True, "Symbolic links and junction directories are blocked."
@@ -389,7 +490,6 @@ def is_protected_system_path(
         return True, "Root filesystem directories cannot be organized."
 
     # 2. Prevent organizing the root user home directory itself on all platforms
-    #    (e.g., C:\Users\username, /Users/username, /home/username)
     try:
         home = Path.home()
         norm_home = _normalize_path_str(str(home), current_os)
@@ -490,7 +590,6 @@ def is_protected_system_path(
                 return True, f"Protected Windows component '{part}'."
 
     elif current_os == "Darwin":
-        # macOS Blacklist: /, /System, /Library, /Applications, /private, /usr, /bin, /sbin, ~/Library
         mac_trees = [
             "/System",
             "/Library",
@@ -513,7 +612,6 @@ def is_protected_system_path(
             if _is_subpath_or_equal(norm_target, norm_tree, "/"):
                 return True, f"Protected macOS directory '{tree}'."
 
-        # Also block /Users root and any `/Users/<user>/Library` or `/Users/<user>`
         parts = [p for p in norm_target.split("/") if p]
         if parts == ["Users"] or (len(parts) == 2 and parts[0] == "Users"):
             return True, "Protected macOS /Users root directory."
@@ -521,7 +619,6 @@ def is_protected_system_path(
             return True, "Protected macOS ~/Library directory."
 
     else:
-        # Linux / POSIX Blacklist: /, /boot, /etc, /sys, /proc, /dev, /usr, /bin, /sbin, /var, /root
         linux_trees = [
             "/boot",
             "/etc",
@@ -557,11 +654,7 @@ def is_protected_system_path(
 
 
 def is_reserved_windows_name(filename: str) -> bool:
-    """
-    Control 2 (Windows Reserved Device Name Defense):
-    Check if a filename matches a reserved MS-DOS/Windows device name such as
-    CON, PRN, AUX, NUL, COM1-COM9, LPT1-LPT9 (with or without extensions).
-    """
+    """Check if a filename matches a reserved Windows device name (CON, PRN, AUX, NUL, etc.)."""
     trimmed = filename.strip(" .")
     if not trimmed:
         return True
@@ -573,11 +666,8 @@ def is_reserved_windows_name(filename: str) -> bool:
 
 def inspect_and_sanitize_filename(raw_name: str) -> Tuple[bool, str, str]:
     """
-    Control 2 (Path Traversal, ADS, Reserved Names & Unicode Spoofing Defense):
-    - Blocks Alternate Data Streams (':' in filename) and path traversal ('..', '/', '\\').
-    - Strips Unicode Bidirectional Override characters (such as RLO \\u202E) and
-      ASCII control characters so disguised executables are neutralized.
-    - Blocks Windows Reserved Device Names (CON, PRN, AUX, NUL, COM1..9, LPT1..9).
+    Inspect and sanitize a filename against ADS (':'), path traversal ('..', '/', '\\'),
+    Unicode Bidirectional Override spoofing ('\\u202E'), and Windows Reserved Device Names.
     """
     if not raw_name:
         return False, "", "Empty filename"
@@ -616,7 +706,6 @@ def inspect_and_sanitize_filename(raw_name: str) -> Tuple[bool, str, str]:
 
 def verify_path_containment(base_dir: Path, category_dir: Path, dest_path: Path) -> bool:
     """
-    Control 2 & 3 (Strict Path Containment Verification):
     Strictly verify using Path.resolve() and os.path.commonpath() that:
     1. Neither `base_dir`, `category_dir`, nor `dest_path` is a symlink/junction.
     2. `category_dir` resolves as a direct child of `base_dir`.
@@ -655,8 +744,7 @@ def verify_path_containment(base_dir: Path, category_dir: Path, dest_path: Path)
 
 def _disallow_copy_fallback(_src: str, _dst: str) -> None:
     """
-    Control 4 (Non-Destructive Atomic Move Helper):
-    Prevents `shutil.move` from falling back to non-atomic copy+delete when a
+    Prevent `shutil.move` from falling back to non-atomic copy+delete when a
     file is locked, guaranteeing zero partial copies and zero file deletions.
     """
     raise PermissionError("Atomic rename blocked because the file is currently in use.")
@@ -670,12 +758,8 @@ def atomic_verified_move(
     current_os: str = CURRENT_OS,
 ) -> Tuple[bool, str]:
     """
-    Specification 4 & Control 4 (Cross-Platform Permission Check, TOCTOU & Integrity):
-    1. Verifies strict path containment and non-symlink status.
-    2. On POSIX (macOS/Linux), checks write permissions via `os.access(..., os.W_OK)`.
-    3. Captures pre-move `st_size` and `st_ino` via `os.lstat()`.
-    4. Executes an atomic, non-overwriting move (`shutil.move` with copy fallback disabled).
-    5. Verifies post-move destination existence, regular file mode, size, and inode.
+    Execute an atomic, non-overwriting file move from `source_path` into
+    `category_dir / dest_path.name` with TOCTOU and post-move size/inode verification.
     """
     if not verify_path_containment(base_dir, category_dir, dest_path):
         return (
@@ -690,7 +774,6 @@ def atomic_verified_move(
         )
 
     try:
-        # Specification 4: On POSIX (macOS/Linux), verify write permissions before moving
         if current_os != "Windows":
             if not os.access(source_path, os.W_OK) or not os.access(
                 source_path.parent, os.W_OK
@@ -717,7 +800,6 @@ def atomic_verified_move(
                 f"Blocked '{source_path.name}': Category folder is a symlink or junction.",
             )
 
-        # TOCTOU check immediately before moving
         confirm_stat = os.lstat(source_path)
         confirm_attrs = getattr(confirm_stat, "st_file_attributes", 0)
         if (
@@ -743,7 +825,6 @@ def atomic_verified_move(
             copy_function=_disallow_copy_fallback,
         )
 
-        # Post-move integrity verification
         post_stat = os.lstat(dest_path)
         if (
             not stat.S_ISREG(post_stat.st_mode)
@@ -778,6 +859,68 @@ def atomic_verified_move(
         )
 
 
+def atomic_verified_restore(
+    moved_path: Path,
+    restore_dest: Path,
+    base_dir: Path,
+    current_os: str = CURRENT_OS,
+) -> Tuple[bool, str]:
+    """
+    Safely move a sorted file from its category subfolder (`moved_path`) back to
+    the root target folder (`restore_dest`) for the "Undo Last Organize" feature.
+    Never overwrites existing files and verifies containment and integrity.
+    """
+    try:
+        if not moved_path.exists() or is_symlink_or_junction(moved_path):
+            return False, f"Could not restore '{moved_path.name}' (file was already moved or modified)."
+
+        category_dir = moved_path.parent
+        if not verify_path_containment(base_dir, category_dir, moved_path):
+            return False, f"Blocked restore of '{moved_path.name}': Outside target folder."
+
+        if restore_dest.resolve().parent != base_dir.resolve():
+            return False, f"Blocked restore of '{moved_path.name}': Invalid restore destination."
+
+        if current_os != "Windows":
+            if not os.access(moved_path, os.W_OK) or not os.access(base_dir, os.W_OK):
+                return False, f"Skipped restoring '{moved_path.name}' (write permission denied)."
+
+        pre_stat = os.lstat(moved_path)
+        if not stat.S_ISREG(pre_stat.st_mode):
+            return False, f"Skipped restoring '{moved_path.name}' (not a regular file)."
+
+        expected_size = pre_stat.st_size
+        expected_ino = pre_stat.st_ino
+
+        if restore_dest.exists():
+            return False, f"Skipped restoring '{moved_path.name}' to avoid overwriting."
+
+        shutil.move(
+            str(moved_path),
+            str(restore_dest),
+            copy_function=_disallow_copy_fallback,
+        )
+
+        post_stat = os.lstat(restore_dest)
+        if (
+            not stat.S_ISREG(post_stat.st_mode)
+            or post_stat.st_size != expected_size
+            or (
+                expected_ino != 0
+                and post_stat.st_ino != 0
+                and post_stat.st_ino != expected_ino
+            )
+        ):
+            return False, f"Warning: '{restore_dest.name}' verification mismatch after undo."
+
+        return True, ""
+
+    except PermissionError:
+        return False, f"Could not restore '{moved_path.name}' because it is open in another app."
+    except (OSError, ValueError):
+        return False, f"Could not restore '{moved_path.name}' because it is in use."
+
+
 # ==============================================================================
 # 6. PLATFORM-SPECIFIC SYSTEM & HIDDEN FILE FILTERING
 # ==============================================================================
@@ -786,37 +929,28 @@ def should_ignore_filename_by_rules(
     filename: str, current_os: str = CURRENT_OS
 ) -> bool:
     """
-    Specification 3 (Platform-Specific System & Hidden File Filtering by name):
-    - Cross-platform: Dotfiles (`.` prefix), Office lock files (`~$*`), incomplete
-      downloads (`.crdownload`, `.part`, `.tmp`), and editor swap files (`*.swp`).
-    - Windows: `desktop.ini`, `thumbs.db`, etc.
-    - macOS: `.DS_Store`, AppleDouble (`._*`), `.localized`, `.Trashes`, `.Spotlight-V100`, `Icon\\r`.
-    - Linux: Editor backup/swap files (`*.swp`, `*.swo`, `*~`, `#*#`), `.directory`.
+    Filter out OS metadata and temporary/in-progress download files across
+    Windows, macOS, and Linux.
     """
     if not filename:
         return True
 
     lower_name = filename.lower()
 
-    # Cross-platform: Any file starting with '.' (includes .DS_Store, ._* AppleDouble, .localized, etc.)
     if filename.startswith("."):
         return True
 
-    # Cross-platform: Office temporary lock files (~$Budget.xlsx)
     if filename.startswith("~$"):
         return True
 
-    # Linux / Unix editor backup and auto-save files (*~ and #*#)
     if filename.endswith("~") or (
         filename.startswith("#") and filename.endswith("#")
     ):
         return True
 
-    # Known OS system metadata filenames across Windows, macOS, and Linux
     if lower_name in ALL_IGNORED_FILENAMES:
         return True
 
-    # Incomplete download artifacts & swap extensions
     ext = Path(filename).suffix.lower()
     if ext in IGNORED_TEMP_EXTENSIONS:
         return True
@@ -843,12 +977,10 @@ def should_ignore_file(
 
         if file_path.exists():
             lstat_info = os.lstat(file_path)
-            # Windows hidden / system attributes
             win_attrs = getattr(lstat_info, "st_file_attributes", 0)
             if win_attrs & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM):
                 return True
 
-            # macOS BSD UF_HIDDEN flag
             bsd_flags = getattr(lstat_info, "st_flags", 0)
             if bsd_flags & UF_HIDDEN:
                 return True
@@ -934,14 +1066,17 @@ def build_friendly_preview_sentence(category_counts: Dict[str, int]) -> str:
 
 
 # ==============================================================================
-# 7. CUSTOM ROUNDED BUTTON WIDGET (PURE TKINTER CANVAS)
+# 7. CUSTOM ROUNDED BUTTON WIDGET (WITH ENABLED / DISABLED STATES)
 # ==============================================================================
 
 class RoundedButton(tk.Canvas):
     """
     A modern, rounded-corner button built on tk.Canvas that renders consistently
-    across Windows, macOS, and Linux.
+    across Windows, macOS, and Linux, supporting enabled and disabled states.
     """
+
+    DISABLED_BG = "#E2E8F0"
+    DISABLED_FG = "#94A3B8"
 
     def __init__(
         self,
@@ -956,6 +1091,7 @@ class RoundedButton(tk.Canvas):
         fg_color: str = "#FFFFFF",
         font: tuple = (UI_FONT, 10, "bold"),
         canvas_bg: str = "#FFFFFF",
+        enabled: bool = True,
     ) -> None:
         super().__init__(
             parent,
@@ -964,7 +1100,7 @@ class RoundedButton(tk.Canvas):
             bg=canvas_bg,
             highlightthickness=0,
             bd=0,
-            cursor="hand2",
+            cursor="hand2" if enabled else "arrow",
         )
         self.text = text
         self.command = command
@@ -975,7 +1111,8 @@ class RoundedButton(tk.Canvas):
         self.hover_color = hover_color
         self.fg_color = fg_color
         self.font = font
-        self._current_bg = bg_color
+        self.enabled = enabled
+        self._current_bg = bg_color if enabled else self.DISABLED_BG
 
         self._draw()
 
@@ -989,7 +1126,8 @@ class RoundedButton(tk.Canvas):
         w = self.btn_width
         h = self.btn_height
         r = self.radius
-        c = self._current_bg
+        c = self._current_bg if self.enabled else self.DISABLED_BG
+        fg = self.fg_color if self.enabled else self.DISABLED_FG
 
         self.create_oval(0, 0, 2 * r, 2 * r, fill=c, outline=c)
         self.create_oval(w - 2 * r, 0, w, 2 * r, fill=c, outline=c)
@@ -1002,34 +1140,45 @@ class RoundedButton(tk.Canvas):
             w // 2,
             h // 2,
             text=self.text,
-            fill=self.fg_color,
+            fill=fg,
             font=self.font,
         )
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Enable or disable the button visually and functionally."""
+        self.enabled = enabled
+        self._current_bg = self.bg_color if enabled else self.DISABLED_BG
+        self.configure(cursor="hand2" if enabled else "arrow")
+        self._draw()
 
     def set_colors(self, bg_color: str, hover_color: str, fg_color: str) -> None:
         """Update button palette (e.g., when highlighting the active folder button)."""
         self.bg_color = bg_color
         self.hover_color = hover_color
         self.fg_color = fg_color
-        self._current_bg = bg_color
+        self._current_bg = bg_color if self.enabled else self.DISABLED_BG
         self._draw()
 
     def _on_enter(self, _event) -> None:
-        self._current_bg = self.hover_color
-        self._draw()
+        if self.enabled:
+            self._current_bg = self.hover_color
+            self._draw()
 
     def _on_leave(self, _event) -> None:
-        self._current_bg = self.bg_color
-        self._draw()
+        if self.enabled:
+            self._current_bg = self.bg_color
+            self._draw()
 
     def _on_click(self, event) -> None:
+        if not self.enabled:
+            return
         if 0 <= event.x <= self.btn_width and 0 <= event.y <= self.btn_height:
             if callable(self.command):
                 self.command()
 
 
 # ==============================================================================
-# 8. MODERN, COMPACT 3-STEP APPLICATION (WINDOWS / MACOS / LINUX)
+# 8. MODERN, COMPACT 3-STEP APPLICATION (WITH UNDO & LIVE AUTO-SORT WATCHER)
 # ==============================================================================
 
 class FriendlyFileOrganizerApp:
@@ -1059,15 +1208,21 @@ class FriendlyFileOrganizerApp:
     ORGANIZE_BTN_BG = "#10B981"
     ORGANIZE_BTN_HOVER = "#059669"
 
+    UNDO_BTN_BG = "#475569"
+    UNDO_BTN_HOVER = "#334155"
+
     WINDOW_WIDTH = 700
-    WINDOW_HEIGHT_COLLAPSED = 630
-    WINDOW_HEIGHT_EXPANDED = 780
+    WINDOW_HEIGHT_COLLAPSED = 665
+    WINDOW_HEIGHT_EXPANDED = 810
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Easy File Organizer")
         self.root.configure(bg=self.BG_WINDOW)
         self.root.resizable(False, False)
+
+        # Attach embedded custom organizer icon (and keep references alive)
+        self._icon_refs = apply_app_icon(self.root)
 
         # Center the compact window on the user's screen
         self._center_window(self.WINDOW_WIDTH, self.WINDOW_HEIGHT_COLLAPSED)
@@ -1078,15 +1233,36 @@ class FriendlyFileOrganizerApp:
         except (NameError, OSError):
             self.script_path = Path.cwd() / "file_organizer.py"
 
-        # State
+        # Core State
         self.current_folder: Path = resolve_user_folder("Downloads")
         self.active_shortcut: str = "Downloads"
         self.shortcut_buttons: Dict[str, RoundedButton] = {}
         self.details_expanded: bool = False
         self.running_elevated: bool = is_running_with_elevated_privileges()
 
+        # Feature 2: Undo Transaction Log [(moved_dest_path, original_source_path), ...]
+        self.last_transaction: List[Tuple[Path, Path]] = []
+
+        # Feature 3: Live Auto-Sort Background Watcher State
+        self.auto_sort_var = tk.BooleanVar(value=False)
+        self._auto_sort_enabled: bool = False
+        self._op_lock = threading.Lock()
+        self._watcher_stop_event = threading.Event()
+        self._watcher_thread: Optional[threading.Thread] = None
+        # Tracks file stability: {Path: (size, mtime_ns, stable_since_monotonic)}
+        self._watched_file_states: Dict[Path, Tuple[int, int, float]] = {}
+        # Thread-safe queue of auto-sorted results for the main Tk thread to display
+        self._pending_auto_sorted: List[Tuple[Path, Path, str]] = []
+
         self._build_ui()
         self._update_folder_display()
+
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self) -> None:
+        """Stop background watcher cleanly before closing the window."""
+        self._watcher_stop_event.set()
+        self.root.destroy()
 
     def _center_window(self, width: int, height: int) -> None:
         """Position the window comfortably in the center of the monitor."""
@@ -1112,7 +1288,7 @@ class FriendlyFileOrganizerApp:
             highlightbackground=self.BORDER_CARD,
             highlightthickness=1,
             padx=18,
-            pady=14,
+            pady=13,
         )
         card.pack(fill=tk.X, pady=pady)
         return card
@@ -1120,7 +1296,7 @@ class FriendlyFileOrganizerApp:
     def _build_ui(self) -> None:
         """Build the compact 3-step visual interface."""
         self.main_column = tk.Frame(
-            self.root, bg=self.BG_WINDOW, width=652, padx=24, pady=14
+            self.root, bg=self.BG_WINDOW, width=652, padx=24, pady=12
         )
         self.main_column.pack(anchor=tk.N, fill=tk.BOTH, expand=True)
 
@@ -1147,7 +1323,6 @@ class FriendlyFileOrganizerApp:
             anchor="w",
         ).pack(fill=tk.X, pady=(1, 0))
 
-        # Specification 4: Principle-of-Least-Privilege banner if running as Admin / root
         if self.running_elevated:
             priv_name = "Administrator" if CURRENT_OS == "Windows" else "root"
             admin_banner = tk.Frame(
@@ -1156,7 +1331,7 @@ class FriendlyFileOrganizerApp:
                 highlightbackground="#F59E0B",
                 highlightthickness=1,
                 padx=12,
-                pady=6,
+                pady=5,
             )
             admin_banner.pack(fill=tk.X, pady=(0, 8))
             tk.Label(
@@ -1180,10 +1355,10 @@ class FriendlyFileOrganizerApp:
             fg=self.TEXT_PRIMARY,
             bg=self.BG_CARD,
             anchor="w",
-        ).pack(fill=tk.X, pady=(0, 10))
+        ).pack(fill=tk.X, pady=(0, 9))
 
         btn_row = tk.Frame(step1_card, bg=self.BG_CARD)
-        btn_row.pack(fill=tk.X, pady=(0, 10))
+        btn_row.pack(fill=tk.X, pady=(0, 9))
 
         shortcut_meta = [
             ("Downloads", "📥 Downloads", 132),
@@ -1280,7 +1455,7 @@ class FriendlyFileOrganizerApp:
         self.badges_container.pack(fill=tk.X)
 
         # ======================================================================
-        # STEP 3: ORGANIZE (CENTERED BUTTON & CELEBRATION BANNER)
+        # STEP 3: ORGANIZE, UNDO & LIVE AUTO-SORT WATCHER
         # ======================================================================
         step3_card = self._create_card(self.main_column, pady=(0, 6))
 
@@ -1293,14 +1468,18 @@ class FriendlyFileOrganizerApp:
             anchor="w",
         ).pack(fill=tk.X, pady=(0, 8))
 
-        organize_btn_holder = tk.Frame(step3_card, bg=self.BG_CARD)
-        organize_btn_holder.pack(fill=tk.X, pady=(0, 4))
+        # Centered button group: [✨ Organize My Files] + [↩ Undo Last Organize]
+        action_outer = tk.Frame(step3_card, bg=self.BG_CARD)
+        action_outer.pack(fill=tk.X, pady=(0, 8))
+
+        action_group = tk.Frame(action_outer, bg=self.BG_CARD)
+        action_group.pack(anchor=tk.CENTER)
 
         self.organize_btn = RoundedButton(
-            organize_btn_holder,
+            action_group,
             text="✨ Organize My Files",
-            width=270,
-            height=45,
+            width=255,
+            height=44,
             corner_radius=12,
             bg_color=self.ORGANIZE_BTN_BG,
             hover_color=self.ORGANIZE_BTN_HOVER,
@@ -1309,19 +1488,72 @@ class FriendlyFileOrganizerApp:
             canvas_bg=self.BG_CARD,
             command=self._run_organize_files,
         )
-        self.organize_btn.pack(anchor=tk.CENTER)
+        self.organize_btn.pack(side=tk.LEFT, padx=(0, 10))
 
+        self.undo_btn = RoundedButton(
+            action_group,
+            text="↩ Undo Last Organize",
+            width=190,
+            height=44,
+            corner_radius=12,
+            bg_color=self.UNDO_BTN_BG,
+            hover_color=self.UNDO_BTN_HOVER,
+            fg_color="#FFFFFF",
+            font=(UI_FONT, 10, "bold"),
+            canvas_bg=self.BG_CARD,
+            enabled=False,  # Disabled by default until a sort operation occurs
+            command=self._run_undo_last_organize,
+        )
+        self.undo_btn.pack(side=tk.LEFT)
+
+        # Feature 3: Auto-Sort Live Watcher Toggle & Status Indicator Badge
+        watcher_row = tk.Frame(
+            step3_card,
+            bg="#F8FAFC",
+            highlightbackground="#E2E8F0",
+            highlightthickness=1,
+            padx=10,
+            pady=6,
+        )
+        watcher_row.pack(fill=tk.X, pady=(2, 2))
+
+        self.auto_sort_checkbox = tk.Checkbutton(
+            watcher_row,
+            text="Auto-sort new files as they arrive (Live Watcher)",
+            variable=self.auto_sort_var,
+            font=(UI_FONT, 9, "bold"),
+            fg=self.TEXT_PRIMARY,
+            bg="#F8FAFC",
+            activebackground="#F8FAFC",
+            activeforeground=self.TEXT_PRIMARY,
+            selectcolor="#FFFFFF",
+            cursor="hand2",
+            command=self._on_toggle_auto_sort,
+        )
+        self.auto_sort_checkbox.pack(side=tk.LEFT)
+
+        self.watcher_badge_label = tk.Label(
+            watcher_row,
+            text="",
+            font=(UI_FONT, 9, "bold"),
+            fg="#047857",
+            bg="#ECFDF5",
+            padx=8,
+            pady=2,
+        )
+
+        # Celebration / Undo / Status Banner
         self.banner_frame = tk.Frame(step3_card, bg=self.BG_CARD)
-        self.banner_frame.pack(fill=tk.X, pady=(6, 0))
+        self.banner_frame.pack(fill=tk.X, pady=(4, 0))
 
         self.status_banner = tk.Label(
             self.banner_frame,
             text="",
-            font=(UI_FONT, 11, "bold"),
+            font=(UI_FONT, 10, "bold"),
             bg=self.BG_CARD,
             fg=self.TEXT_SECONDARY,
             padx=12,
-            pady=8,
+            pady=7,
             wraplength=580,
             justify=tk.CENTER,
         )
@@ -1462,7 +1694,7 @@ class FriendlyFileOrganizerApp:
     def _show_banner(
         self, text: str, is_success: bool = True, warnings: Optional[List[str]] = None
     ) -> None:
-        """Display or hide the friendly celebration banner in Step 3."""
+        """Display or hide the friendly celebration / restoration banner in Step 3."""
         if not text:
             self.status_banner.pack_forget()
         else:
@@ -1523,7 +1755,7 @@ class FriendlyFileOrganizerApp:
         self.status_box.configure(state=tk.DISABLED)
 
     # ==========================================================================
-    # STEP 1: FOLDER SELECTION HANDLERS (WITH OS BLACKLIST ENFORCEMENT)
+    # STEP 1: FOLDER SELECTION HANDLERS
     # ==========================================================================
 
     def _try_set_target_folder(self, candidate: Path, shortcut_name: str = "") -> bool:
@@ -1539,7 +1771,9 @@ class FriendlyFileOrganizerApp:
 
         self.active_shortcut = shortcut_name
         self.current_folder = candidate
+        self._watched_file_states.clear()
         self._update_folder_display()
+        self._update_watcher_badge()
         return True
 
     def _select_shortcut_folder(self, folder_name: str) -> None:
@@ -1587,25 +1821,23 @@ class FriendlyFileOrganizerApp:
         self._run_safe_preview(show_error_modal=False)
 
     # ==========================================================================
-    # STEP 2 (SAFE PREVIEW) & STEP 3 (ORGANIZE MY FILES)
+    # STEP 2 (SAFE PREVIEW) & STEP 3 (ORGANIZE + UNDO)
     # ==========================================================================
 
     def _scan_eligible_files(
-        self,
+        self, target_folder: Optional[Path] = None
     ) -> Tuple[List[Tuple[Path, str]], List[str], str]:
         """
-        Scan only loose top-level files in the selected folder while enforcing:
-        - OS-specific Critical System Path Blacklisting
-        - Cross-platform Hidden & System Metadata Filtering
-        - Filename Sanitization, ADS blocking & Reserved Device Name filtering
-        - Symlink, NTFS Junction & Reparse Point exclusion
-        - Per-entry exception isolation
+        Scan only loose top-level files in `target_folder` (defaults to `self.current_folder`)
+        while enforcing all security, symlink, and hidden-file rules.
         """
-        is_blocked, _reason = is_protected_system_path(self.current_folder)
+        folder = target_folder if target_folder is not None else self.current_folder
+
+        is_blocked, _reason = is_protected_system_path(folder)
         if is_blocked:
             return [], [], PROTECTED_FOLDER_MESSAGE
 
-        if not self.current_folder.exists() or not self.current_folder.is_dir():
+        if not folder.exists() or not folder.is_dir():
             return (
                 [],
                 [],
@@ -1613,9 +1845,7 @@ class FriendlyFileOrganizerApp:
             )
 
         try:
-            entries = sorted(
-                self.current_folder.iterdir(), key=lambda p: p.name.lower()
-            )
+            entries = sorted(folder.iterdir(), key=lambda p: p.name.lower())
         except PermissionError:
             return (
                 [],
@@ -1729,98 +1959,379 @@ class FriendlyFileOrganizerApp:
         self._set_advanced_details(preview_details + security_notes)
 
     def _run_organize_files(self) -> None:
-        """Step 3: Move loose files into neat category subfolders with full security verification."""
-        eligible_items, security_notes, error_msg = self._scan_eligible_files()
+        """Step 3: Move loose files into neat category subfolders and record Undo transaction."""
+        with self._op_lock:
+            eligible_items, security_notes, error_msg = self._scan_eligible_files()
 
-        if error_msg:
-            if error_msg == PROTECTED_FOLDER_MESSAGE:
-                messagebox.showerror(
-                    "Protected System Folder", error_msg, parent=self.root
+            if error_msg:
+                if error_msg == PROTECTED_FOLDER_MESSAGE:
+                    messagebox.showerror(
+                        "Protected System Folder", error_msg, parent=self.root
+                    )
+                else:
+                    messagebox.showwarning(
+                        "Cannot Open Folder", error_msg, parent=self.root
+                    )
+                return
+
+            if not eligible_items:
+                self._show_banner(
+                    "🎉 All clean! This folder is already neat and tidy.",
+                    is_success=True,
+                    warnings=security_notes,
+                )
+                return
+
+            moved_count = 0
+            moved_counts_by_cat: Dict[str, int] = {}
+            reserved_destinations: Set[str] = set()
+            moved_details: List[str] = []
+            skipped_warnings: List[str] = list(security_notes)
+            current_transaction: List[Tuple[Path, Path]] = []
+
+            for file_path, sanitized_name in eligible_items:
+                try:
+                    category = get_category_for_filename(sanitized_name)
+                    category_dir = self.current_folder / category
+                    safe_dest = get_safe_destination_path(
+                        category_dir, sanitized_name, reserved_destinations
+                    )
+
+                    success, warn_msg = atomic_verified_move(
+                        source_path=file_path,
+                        dest_path=safe_dest,
+                        base_dir=self.current_folder,
+                        category_dir=category_dir,
+                    )
+
+                    if success:
+                        reserved_destinations.add(os.path.normcase(str(safe_dest)))
+                        current_transaction.append((safe_dest, file_path))
+                        moved_count += 1
+                        moved_counts_by_cat[category] = (
+                            moved_counts_by_cat.get(category, 0) + 1
+                        )
+                        if safe_dest.name != file_path.name:
+                            moved_details.append(
+                                f"✓ Moved '{file_path.name}' into {category} (saved as '{safe_dest.name}')"
+                            )
+                        else:
+                            moved_details.append(
+                                f"✓ Moved '{file_path.name}' into {category}"
+                            )
+                    else:
+                        if warn_msg:
+                            skipped_warnings.append(warn_msg)
+
+                except (PermissionError, OSError, ValueError) as exc:
+                    skipped_warnings.append(
+                        f"Skipped {file_path.name} ({exc.__class__.__name__})."
+                    )
+
+            file_word = "file" if moved_count == 1 else "files"
+            if moved_count > 0:
+                self.last_transaction = current_transaction
+                self.undo_btn.set_enabled(True)
+
+                banner_text = (
+                    f"🎉 All clean! {moved_count} {file_word} organized successfully."
+                )
+                self.preview_summary_label.configure(
+                    text=f"Sorted {moved_count} {file_word} into these folders:",
+                    fg=self.TEXT_PRIMARY,
+                    font=(UI_FONT, 10, "bold"),
+                )
+                self._render_category_badges(moved_counts_by_cat)
+                self._show_banner(
+                    banner_text, is_success=True, warnings=skipped_warnings
                 )
             else:
-                messagebox.showwarning(
-                    "Cannot Open Folder", error_msg, parent=self.root
+                self._show_banner(
+                    "No files were moved because they are currently open or protected.",
+                    is_success=False,
+                    warnings=skipped_warnings,
                 )
-            return
 
-        if not eligible_items:
-            self._show_banner(
-                "🎉 All clean! This folder is already neat and tidy.",
-                is_success=True,
-                warnings=security_notes,
+            self._set_advanced_details(moved_details + skipped_warnings)
+
+    def _run_undo_last_organize(self) -> None:
+        """
+        Feature 2 ("Undo Last Organize"):
+        Safely reverse `self.last_transaction`, moving sorted files back to their
+        original locations while handling any filename conflicts gracefully.
+        """
+        with self._op_lock:
+            if not self.last_transaction:
+                self.undo_btn.set_enabled(False)
+                return
+
+            restored_count = 0
+            reserved_restore_paths: Set[str] = set()
+            restore_details: List[str] = []
+            restore_warnings: List[str] = []
+            remaining_transaction: List[Tuple[Path, Path]] = []
+
+            for moved_dest_path, original_source_path in reversed(self.last_transaction):
+                try:
+                    base_dir = original_source_path.parent
+                    is_blocked, _ = is_protected_system_path(base_dir)
+                    if is_blocked:
+                        restore_warnings.append(
+                            f"Blocked restore to protected folder '{base_dir}'."
+                        )
+                        continue
+
+                    is_safe, clean_orig_name, _ = inspect_and_sanitize_filename(
+                        original_source_path.name
+                    )
+                    target_name = (
+                        clean_orig_name if is_safe else moved_dest_path.name
+                    )
+
+                    # Resolve any conflict at the original location without overwriting
+                    safe_restore_path = get_safe_destination_path(
+                        base_dir, target_name, reserved_restore_paths
+                    )
+
+                    success, warn_msg = atomic_verified_restore(
+                        moved_path=moved_dest_path,
+                        restore_dest=safe_restore_path,
+                        base_dir=base_dir,
+                    )
+
+                    if success:
+                        reserved_restore_paths.add(
+                            os.path.normcase(str(safe_restore_path))
+                        )
+                        restored_count += 1
+                        if safe_restore_path.name != original_source_path.name:
+                            restore_details.append(
+                                f"↩ Restored '{moved_dest_path.name}' as '{safe_restore_path.name}' (to avoid conflict)"
+                            )
+                        else:
+                            restore_details.append(
+                                f"↩ Restored '{original_source_path.name}' back to {base_dir.name}"
+                            )
+                    else:
+                        remaining_transaction.append(
+                            (moved_dest_path, original_source_path)
+                        )
+                        if warn_msg:
+                            restore_warnings.append(warn_msg)
+
+                except (PermissionError, OSError, ValueError) as exc:
+                    remaining_transaction.append(
+                        (moved_dest_path, original_source_path)
+                    )
+                    restore_warnings.append(
+                        f"Could not restore '{moved_dest_path.name}' ({exc.__class__.__name__})."
+                    )
+
+            self.last_transaction = list(reversed(remaining_transaction))
+            self.undo_btn.set_enabled(bool(self.last_transaction))
+
+            # Refresh Step 2 category preview badges to show the restored loose files
+            self._run_safe_preview(show_error_modal=False)
+
+            spot_word = (
+                "file back to its original spot"
+                if restored_count == 1
+                else "files back to their original spots"
             )
+            if restored_count > 0:
+                banner_msg = f"Restored {restored_count} {spot_word}."
+                self._show_banner(
+                    banner_msg, is_success=True, warnings=restore_warnings
+                )
+            else:
+                self._show_banner(
+                    "Could not restore files because they were moved or are currently open.",
+                    is_success=False,
+                    warnings=restore_warnings,
+                )
+
+            self._set_advanced_details(restore_details + restore_warnings)
+
+    # ==========================================================================
+    # FEATURE 3: "AUTO-SORT" BACKGROUND WATCHER (LIVE WATCHER)
+    # ==========================================================================
+
+    def _update_watcher_badge(self) -> None:
+        """Show or hide the subtle '🟢 Live auto-sorting is active for [Folder]' indicator."""
+        if self.auto_sort_var.get():
+            friendly_name = self.current_folder.name or str(self.current_folder)
+            self.watcher_badge_label.configure(
+                text=f"🟢 Live auto-sorting is active for {friendly_name}",
+                highlightbackground="#A7F3D0",
+                highlightthickness=1,
+            )
+            self.watcher_badge_label.pack(side=tk.RIGHT)
+        else:
+            self.watcher_badge_label.pack_forget()
+
+    def _on_toggle_auto_sort(self) -> None:
+        """Start or pause the background Live Watcher thread when checkbox is toggled."""
+        self._auto_sort_enabled = bool(self.auto_sort_var.get())
+        self._watched_file_states.clear()
+        self._update_watcher_badge()
+
+        if self._auto_sort_enabled:
+            if self._watcher_thread is None or not self._watcher_thread.is_alive():
+                self._watcher_stop_event.clear()
+                self._watcher_thread = threading.Thread(
+                    target=self._auto_sort_watcher_loop,
+                    name="EasyFileOrganizerLiveWatcher",
+                    daemon=True,
+                )
+                self._watcher_thread.start()
+            self.root.after(250, self._poll_watcher_ui_updates)
+
+    def _auto_sort_watcher_loop(self) -> None:
+        """
+        Background daemon thread that monitors `self.current_folder` while
+        `self._auto_sort_enabled` is True.
+        Never touches Tkinter widgets directly; waits until newly detected files
+        have stable size and mtime across `WATCHER_STABILITY_WINDOW_SEC` before
+        sorting them under `self._op_lock`.
+        """
+        while not self._watcher_stop_event.is_set():
+            time.sleep(WATCHER_POLL_INTERVAL_SEC)
+            if self._watcher_stop_event.is_set() or not self._auto_sort_enabled:
+                continue
+
+            folder = self.current_folder
+            eligible_items, _, error_msg = self._scan_eligible_files(
+                target_folder=folder
+            )
+            if error_msg or not eligible_items:
+                self._watched_file_states.clear()
+                continue
+
+            now = time.monotonic()
+            current_paths: Set[Path] = set()
+            ready_to_sort: List[Tuple[Path, str]] = []
+
+            for file_path, sanitized_name in eligible_items:
+                current_paths.add(file_path)
+                try:
+                    st = os.lstat(file_path)
+                    cur_size = st.st_size
+                    cur_mtime = getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))
+                except OSError:
+                    continue
+
+                prev = self._watched_file_states.get(file_path)
+                if prev is None:
+                    self._watched_file_states[file_path] = (
+                        cur_size,
+                        cur_mtime,
+                        now,
+                    )
+                else:
+                    prev_size, prev_mtime, stable_since = prev
+                    if cur_size == prev_size and cur_mtime == prev_mtime:
+                        if (now - stable_since) >= WATCHER_STABILITY_WINDOW_SEC:
+                            ready_to_sort.append((file_path, sanitized_name))
+                    else:
+                        # File is still being written/downloaded; reset stability timer
+                        self._watched_file_states[file_path] = (
+                            cur_size,
+                            cur_mtime,
+                            now,
+                        )
+
+            # Prune files that disappeared or were already moved
+            for tracked in list(self._watched_file_states.keys()):
+                if tracked not in current_paths:
+                    self._watched_file_states.pop(tracked, None)
+
+            if ready_to_sort:
+                self._sort_ready_files_in_worker(ready_to_sort, folder)
+
+    def _sort_ready_files_in_worker(
+        self, ready_items: List[Tuple[Path, str]], target_folder: Path
+    ) -> None:
+        """
+        Thread-safely move stability-verified files in the background worker and
+        append results to `self._pending_auto_sorted` for the main UI thread.
+        """
+        if not self._auto_sort_enabled or target_folder != self.current_folder:
             return
 
-        moved_count = 0
-        moved_counts_by_cat: Dict[str, int] = {}
-        reserved_destinations: Set[str] = set()
-        moved_details: List[str] = []
-        skipped_warnings: List[str] = list(security_notes)
+        if not self._op_lock.acquire(blocking=False):
+            return
 
-        for file_path, sanitized_name in eligible_items:
-            try:
+        try:
+            is_blocked, _ = is_protected_system_path(target_folder)
+            if is_blocked:
+                return
+
+            reserved_destinations: Set[str] = set()
+
+            for file_path, sanitized_name in ready_items:
+                if not file_path.exists():
+                    continue
+
                 category = get_category_for_filename(sanitized_name)
-                category_dir = self.current_folder / category
+                category_dir = target_folder / category
                 safe_dest = get_safe_destination_path(
                     category_dir, sanitized_name, reserved_destinations
                 )
 
-                success, warn_msg = atomic_verified_move(
+                success, _ = atomic_verified_move(
                     source_path=file_path,
                     dest_path=safe_dest,
-                    base_dir=self.current_folder,
+                    base_dir=target_folder,
                     category_dir=category_dir,
                 )
 
                 if success:
                     reserved_destinations.add(os.path.normcase(str(safe_dest)))
-                    moved_count += 1
-                    moved_counts_by_cat[category] = (
-                        moved_counts_by_cat.get(category, 0) + 1
+                    self._watched_file_states.pop(file_path, None)
+                    self._pending_auto_sorted.append(
+                        (safe_dest, file_path, category)
                     )
-                    if safe_dest.name != file_path.name:
-                        moved_details.append(
-                            f"✓ Moved '{file_path.name}' into {category} (saved as '{safe_dest.name}')"
-                        )
-                    else:
-                        moved_details.append(
-                            f"✓ Moved '{file_path.name}' into {category}"
-                        )
-                else:
-                    if warn_msg:
-                        skipped_warnings.append(warn_msg)
+        finally:
+            self._op_lock.release()
 
-            except (PermissionError, OSError, ValueError) as exc:
-                skipped_warnings.append(
-                    f"Skipped {file_path.name} ({exc.__class__.__name__})."
+    def _poll_watcher_ui_updates(self) -> None:
+        """
+        Periodic main-thread callback that drains `self._pending_auto_sorted`
+        and updates the Undo button, category badges, and banner safely.
+        """
+        if self._watcher_stop_event.is_set():
+            return
+
+        if self._pending_auto_sorted:
+            with self._op_lock:
+                drained = list(self._pending_auto_sorted)
+                self._pending_auto_sorted.clear()
+
+            if drained:
+                batch_tx = [(dest, orig) for dest, orig, _ in drained]
+                batch_details = [
+                    f"🟢 Auto-sorted '{orig.name}' into {cat}"
+                    for _, orig, cat in drained
+                ]
+                self.last_transaction.extend(batch_tx)
+                self.undo_btn.set_enabled(True)
+                self._run_safe_preview(show_error_modal=False)
+
+                count = len(drained)
+                file_word = "file" if count == 1 else "files"
+                self._show_banner(
+                    f"🎉 Auto-sorted {count} new {file_word} automatically!",
+                    is_success=True,
                 )
+                self._set_advanced_details(batch_details)
 
-        file_word = "file" if moved_count == 1 else "files"
-        if moved_count > 0:
-            banner_text = (
-                f"🎉 All clean! {moved_count} {file_word} organized successfully."
-            )
-            self.preview_summary_label.configure(
-                text=f"Sorted {moved_count} {file_word} into these folders:",
-                fg=self.TEXT_PRIMARY,
-                font=(UI_FONT, 10, "bold"),
-            )
-            self._render_category_badges(moved_counts_by_cat)
-            self._show_banner(
-                banner_text, is_success=True, warnings=skipped_warnings
-            )
-        else:
-            self._show_banner(
-                "No files were moved because they are currently open or protected.",
-                is_success=False,
-                warnings=skipped_warnings,
-            )
-
-        self._set_advanced_details(moved_details + skipped_warnings)
+        if self._auto_sort_enabled and not self._watcher_stop_event.is_set():
+            self.root.after(250, self._poll_watcher_ui_updates)
 
 
 def main() -> None:
-    """Start the Easy File Organizer desktop app."""
+    """Register Windows AppUserModelID and start the Easy File Organizer desktop app."""
+    set_windows_app_user_model_id()
     root = tk.Tk()
     FriendlyFileOrganizerApp(root)
     root.mainloop()
