@@ -3,39 +3,47 @@ Easy File Organizer (Cross-Platform Security-Hardened Edition)
 ==============================================================
 A modern, responsive, beginner-friendly desktop utility for Windows, macOS, and Linux
 that sorts loose files into neat category subfolders in 3 simple steps, backed by
-dynamic folder queue prioritization and enterprise-grade security controls.
+persistent multi-session rollback history, dynamic folder queue prioritization,
+and enterprise-grade security controls.
 
 Features & Security Controls Implemented:
-1. Dynamic "Messy Folders" Queue & Auto-Prioritization:
-   - Automatically scans candidate folders (Downloads, Desktop, Documents, plus any
-     custom folders added by the user) and counts loose, unsorted files in each.
-   - Dynamically ranks folders so the messiest directories rise to the front of the
-     queue with live count badges (e.g., `[📥 Downloads (15)]`, `[🖥️ Desktop (4)]`),
-     while already-clean folders (`0` loose files) are demoted to the end of the line.
-   - Automatically focuses the messiest folder on launch and auto-advances to the
-     next messy folder in the queue as soon as the current folder is organized!
-2. Responsive Resizable Layout:
-   - Freely resizable (`860x730` default, `720x620` minimum) using responsive Tkinter
-     grid weights so step cards scale smoothly and the bottom details log expands
-     vertically to utilize extra screen space.
-3. Custom Embedded App & Taskbar Icon:
-   - Generates a crisp, self-contained PNG folder/organizer icon in memory using
-     only standard library (`zlib`, `struct`, `base64`) and sets the Windows
-     `AppUserModelID` so both title bar and taskbar show the custom icon.
-4. "Undo Last Organize" & "Auto-Sort" Background Watcher:
-   - Full transaction reversal (`[↩ Undo Last Organize]`) with conflict protection.
-   - Live background watcher thread with download-stability delay (`1.5s`).
+1. Persistent JSON History & Multi-Session Rollback:
+   - Saves every organization run (manual cleans and background watcher batches)
+     to a local persistent JSON file:
+       * Windows: `%LOCALAPPDATA%/EasyFileOrganizer/history.json`
+       * macOS/Linux: `~/.config/easy_file_organizer/history.json`
+   - Stores session ID (UUID), human-readable timestamp, target folder path, status
+     (`completed`, `partially_reverted`, `reverted`), and a file manifest with
+     `original_path`, `current_path`, `filename`, `file_size`, and `file_hash`.
+   - Includes a "History & Rollback" drawer (`[📜 View History]`) showing past
+     sessions in reverse chronological order (`[Downloads] - Nov 9, 2026, 9:10 PM •
+     18 files moved • [Revert This Clean]`), allowing selective rollback of any session.
+2. Dynamic "Messy Folders" Queue & Auto-Prioritization:
+   - Scans candidate folders (Downloads, Desktop, Documents, plus custom folders)
+     and ranks messy folders to the front with live count badges (`[📥 Downloads (15)]`).
+   - Auto-demotes cleaned folders (`0` loose files) and auto-advances to the next
+     messy folder in line.
+3. Responsive Resizable Layout & Custom Embedded Icon:
+   - Freely resizable (`860x750` default, `740x640` minimum) with responsive grid weights.
+   - Generates a custom PNG icon in memory (`zlib`, `struct`, `base64`) and sets the
+     Windows `AppUserModelID` for taskbar branding.
+4. "Auto-Sort" Background Watcher:
+   - Daemon watcher thread with download-stability delay (`1.5s`) and temp-file filtering.
 5. Cross-Platform & Enterprise Security Hardening:
    - OS-specific blacklists (Windows, macOS, Linux), `os.path.commonpath` containment,
      symlink/junction defense, Unicode RLO (`\\u202E`) stripping, ADS (`:`) blocking,
      Reserved Device Name filtering, and a strict zero-deletion/zero-overwrite guarantee.
 
 Uses only the Python standard library:
-base64, ctypes, os, pathlib, platform, shutil, stat, struct, threading, time, tkinter, typing, zlib.
+base64, ctypes, datetime, hashlib, json, os, pathlib, platform, shutil, stat,
+struct, threading, time, tkinter, typing, uuid, zlib.
 """
 
 import base64
 import ctypes
+from datetime import datetime
+import hashlib
+import json
 import os
 from pathlib import Path
 import platform
@@ -46,7 +54,8 @@ import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
+import uuid
 import zlib
 
 
@@ -63,7 +72,7 @@ elif CURRENT_OS == "Darwin":
 else:
     UI_FONT = "DejaVu Sans"
 
-APP_USER_MODEL_ID: str = "EasyFileOrganizer.Desktop.Utility.3"
+APP_USER_MODEL_ID: str = "EasyFileOrganizer.Desktop.Utility.4"
 
 
 def set_windows_app_user_model_id() -> None:
@@ -90,7 +99,7 @@ def build_embedded_icon_png_base64(size: int = 64) -> str:
     scale = size / 64.0
 
     for y in range(size):
-        row = bytearray([0])  # PNG filter type 0 (None)
+        row = bytearray([0])
         fy = y / scale
         for x in range(size):
             fx = x / scale
@@ -215,7 +224,6 @@ EXTENSION_TO_CATEGORY: Dict[str, str] = {
     for ext in extensions
 }
 
-# Friendly icons for standard user folders in the dynamic queue
 FOLDER_ICONS: Dict[str, str] = {
     "downloads": "📥",
     "desktop": "🖥️",
@@ -303,11 +311,119 @@ FORBIDDEN_FILENAME_CHARS: Set[str] = set('<>:"/\\|?*')
 
 WATCHER_POLL_INTERVAL_SEC: float = 0.6
 WATCHER_STABILITY_WINDOW_SEC: float = 1.5
+MAX_STORED_HISTORY_SESSIONS: int = 100
 
 
 # ==============================================================================
-# 4. CROSS-PLATFORM FOLDER RESOLUTION (WINDOWS / MACOS / LINUX XDG)
+# 4. CROSS-PLATFORM FOLDER & PERSISTENT HISTORY PATH RESOLUTION
 # ==============================================================================
+
+def get_default_history_file_path(current_os: str = CURRENT_OS) -> Path:
+    """
+    Requirement 1 (Persistent JSON History Storage Location):
+    - Windows: `%LOCALAPPDATA%/EasyFileOrganizer/history.json`
+    - macOS/Linux: `~/.config/easy_file_organizer/history.json`
+    """
+    home = Path.home()
+    if current_os == "Windows":
+        local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+        base = Path(local_appdata) if local_appdata else (home / "AppData" / "Local")
+        return base / "EasyFileOrganizer" / "history.json"
+    else:
+        xdg_config = os.environ.get("XDG_CONFIG_HOME", "").strip()
+        base = Path(xdg_config) if xdg_config else (home / ".config")
+        return base / "easy_file_organizer" / "history.json"
+
+
+def format_human_timestamp(dt: Optional[datetime] = None) -> str:
+    """
+    Format a datetime into a friendly human-readable string such as:
+    'Nov 9, 2026, 9:10 PM'
+    """
+    now = dt or datetime.now()
+    month_abbr = now.strftime("%b")
+    day = now.day
+    year = now.year
+    hour_12 = now.hour % 12 or 12
+    minute = f"{now.minute:02d}"
+    am_pm = "AM" if now.hour < 12 else "PM"
+    return f"{month_abbr} {day}, {year}, {hour_12}:{minute} {am_pm}"
+
+
+def compute_file_fingerprint(file_path: Path) -> Tuple[int, str]:
+    """
+    Compute `(file_size, sha256_fingerprint)` for a file.
+    To avoid blocking or triggering antivirus open-locks on executables, hashes
+    up to the first 64 KB for non-executable files and falls back to a metadata
+    digest (`size:ino:mtime_ns`) if reading bytes is blocked by the OS.
+    """
+    try:
+        st = os.lstat(file_path)
+        size = st.st_size
+        ext = file_path.suffix.lower()
+        if ext not in (".exe", ".msi", ".dmg", ".pkg", ".deb", ".rpm", ".appimage"):
+            hasher = hashlib.sha256()
+            hasher.update(f"size:{size}:".encode("utf-8"))
+            with open(file_path, "rb") as f:
+                hasher.update(f.read(65536))
+            return size, hasher.hexdigest()[:16]
+        else:
+            digest = hashlib.sha256(
+                f"size:{size}:ino:{st.st_ino}".encode("utf-8")
+            ).hexdigest()[:16]
+            return size, digest
+    except OSError:
+        try:
+            st = os.lstat(file_path)
+            digest = hashlib.sha256(
+                f"size:{st.st_size}:ino:{st.st_ino}".encode("utf-8")
+            ).hexdigest()[:16]
+            return st.st_size, digest
+        except OSError:
+            return 0, "0000000000000000"
+
+
+def load_history_sessions(history_file: Path) -> List[Dict[str, Any]]:
+    """
+    Load the list of past organization sessions from `history.json`.
+    Returns an empty list if the file does not exist yet or is malformed.
+    """
+    if not history_file.is_file():
+        return []
+    try:
+        raw_text = history_file.read_text(encoding="utf-8", errors="ignore")
+        data = json.loads(raw_text)
+        if isinstance(data, dict) and isinstance(data.get("sessions"), list):
+            return data["sessions"]
+        if isinstance(data, list):
+            return data
+    except (OSError, ValueError, TypeError):
+        pass
+    return []
+
+
+def save_history_sessions(
+    history_file: Path, sessions: List[Dict[str, Any]]
+) -> bool:
+    """
+    Persist the list of organization sessions to `history.json` (non-destructively).
+    """
+    try:
+        history_file.parent.mkdir(parents=True, exist_ok=True)
+        trimmed = sessions[:MAX_STORED_HISTORY_SESSIONS]
+        payload = {
+            "version": 1,
+            "updated_at": datetime.now().isoformat(),
+            "sessions": trimmed,
+        }
+        history_file.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return True
+    except OSError:
+        return False
+
 
 def _parse_linux_xdg_user_dirs(home: Path) -> Dict[str, Path]:
     """
@@ -745,21 +861,26 @@ def atomic_verified_move(
     base_dir: Path,
     category_dir: Path,
     current_os: str = CURRENT_OS,
-) -> Tuple[bool, str]:
+) -> Tuple[bool, str, int, str]:
     """
     Execute an atomic, non-overwriting file move from `source_path` into
     `category_dir / dest_path.name` with TOCTOU and post-move size/inode verification.
+    Returns `(success, warning_msg, file_size, file_hash)`.
     """
     if not verify_path_containment(base_dir, category_dir, dest_path):
         return (
             False,
             f"Blocked '{source_path.name}': Destination failed path containment check.",
+            0,
+            "",
         )
 
     if is_symlink_or_junction(source_path):
         return (
             False,
             f"Skipped '{source_path.name}' because symbolic links are not moved.",
+            0,
+            "",
         )
 
     try:
@@ -770,6 +891,8 @@ def atomic_verified_move(
                 return (
                     False,
                     f"Skipped {source_path.name} because you do not have write permission for it.",
+                    0,
+                    "",
                 )
 
         pre_stat = os.lstat(source_path)
@@ -777,16 +900,21 @@ def atomic_verified_move(
             return (
                 False,
                 f"Skipped '{source_path.name}' because it is not a regular file.",
+                0,
+                "",
             )
 
         expected_size = pre_stat.st_size
         expected_ino = pre_stat.st_ino
+        _, file_hash = compute_file_fingerprint(source_path)
 
         category_dir.mkdir(exist_ok=True)
         if is_symlink_or_junction(category_dir):
             return (
                 False,
                 f"Blocked '{source_path.name}': Category folder is a symlink or junction.",
+                0,
+                "",
             )
 
         confirm_stat = os.lstat(source_path)
@@ -800,12 +928,16 @@ def atomic_verified_move(
             return (
                 False,
                 f"Skipped '{source_path.name}' because the file changed during scanning.",
+                0,
+                "",
             )
 
         if dest_path.exists():
             return (
                 False,
                 f"Skipped '{source_path.name}' to avoid overwriting an existing file.",
+                0,
+                "",
             )
 
         shutil.move(
@@ -827,24 +959,32 @@ def atomic_verified_move(
             return (
                 False,
                 f"Warning: '{dest_path.name}' integrity verification mismatch after move.",
+                0,
+                "",
             )
 
-        return True, ""
+        return True, "", expected_size, file_hash
 
     except PermissionError:
         return (
             False,
             f"Skipped {source_path.name} because it is currently open or permission was denied.",
+            0,
+            "",
         )
     except FileExistsError:
         return (
             False,
             f"Skipped {source_path.name} because a file with that name already exists.",
+            0,
+            "",
         )
     except (OSError, ValueError):
         return (
             False,
             f"Skipped {source_path.name} because the operating system is currently using or protecting it.",
+            0,
+            "",
         )
 
 
@@ -852,17 +992,23 @@ def atomic_verified_restore(
     moved_path: Path,
     restore_dest: Path,
     base_dir: Path,
+    expected_record_size: Optional[int] = None,
     current_os: str = CURRENT_OS,
 ) -> Tuple[bool, str]:
     """
     Safely move a sorted file from its category subfolder (`moved_path`) back to
-    the root target folder (`restore_dest`) for the "Undo Last Organize" feature.
+    the root target folder (`restore_dest`) for session rollback / undo.
     """
     try:
-        if not moved_path.exists() or is_symlink_or_junction(moved_path):
+        if not moved_path.exists():
             return (
                 False,
-                f"Could not restore '{moved_path.name}' (file was already moved or modified).",
+                f"Skipped '{moved_path.name}' because it was moved or removed since that session.",
+            )
+        if is_symlink_or_junction(moved_path):
+            return (
+                False,
+                f"Skipped '{moved_path.name}' because it is a symbolic link.",
             )
 
         category_dir = moved_path.parent
@@ -919,7 +1065,7 @@ def atomic_verified_restore(
         ):
             return (
                 False,
-                f"Warning: '{restore_dest.name}' verification mismatch after undo.",
+                f"Warning: '{restore_dest.name}' verification mismatch after rollback.",
             )
 
         return True, ""
@@ -943,10 +1089,7 @@ def atomic_verified_restore(
 def should_ignore_filename_by_rules(
     filename: str, current_os: str = CURRENT_OS
 ) -> bool:
-    """
-    Filter out OS metadata and temporary/in-progress download files across
-    Windows, macOS, and Linux.
-    """
+    """Filter out OS metadata and temporary/in-progress download files."""
     if not filename:
         return True
 
@@ -1114,7 +1257,7 @@ def build_friendly_preview_sentence(category_counts: Dict[str, int]) -> str:
 
 
 # ==============================================================================
-# 7. CUSTOM ROUNDED BUTTON WIDGET (WITH DYNAMIC TEXT & COLOR UPDATES)
+# 7. CUSTOM ROUNDED BUTTON WIDGET
 # ==============================================================================
 
 class RoundedButton(tk.Canvas):
@@ -1235,13 +1378,13 @@ class RoundedButton(tk.Canvas):
 
 
 # ==============================================================================
-# 8. RESPONSIVE 3-STEP APPLICATION WITH DYNAMIC MESSY FOLDER QUEUE
+# 8. RESPONSIVE APPLICATION WITH PERSISTENT HISTORY & MULTI-SESSION ROLLBACK
 # ==============================================================================
 
 class FriendlyFileOrganizerApp:
     """
-    Responsive, modern 3-step file organizer featuring dynamic folder queue
-    prioritization, auto-progression, undo support, and a live auto-sort watcher.
+    Responsive, modern 3-step file organizer featuring persistent JSON history,
+    multi-session rollback, dynamic folder queue prioritization, and live auto-sort.
     """
 
     BG_WINDOW = "#F4F6F8"
@@ -1250,22 +1393,18 @@ class FriendlyFileOrganizerApp:
     TEXT_PRIMARY = "#0F172A"
     TEXT_SECONDARY = "#475569"
 
-    # Active selected folder pill
     PILL_ACTIVE_BG = "#2563EB"
     PILL_ACTIVE_HOVER = "#1D4ED8"
     PILL_ACTIVE_FG = "#FFFFFF"
 
-    # Unselected folder pill with messy files waiting (> 0)
     PILL_MESSY_BG = "#EFF6FF"
     PILL_MESSY_HOVER = "#DBEAFE"
     PILL_MESSY_FG = "#1E40AF"
 
-    # Demoted clean folder pill (0 loose files)
     PILL_CLEAN_BG = "#F1F5F9"
     PILL_CLEAN_HOVER = "#E2E8F0"
     PILL_CLEAN_FG = "#64748B"
 
-    # Browse / Add Folder button
     PILL_BROWSE_BG = "#F8FAFC"
     PILL_BROWSE_HOVER = "#E2E8F0"
     PILL_BROWSE_FG = "#334155"
@@ -1279,34 +1418,46 @@ class FriendlyFileOrganizerApp:
     UNDO_BTN_BG = "#475569"
     UNDO_BTN_HOVER = "#334155"
 
-    # Default & minimum window dimensions (freely resizable)
-    WINDOW_DEFAULT_WIDTH = 860
-    WINDOW_DEFAULT_HEIGHT = 730
-    WINDOW_MIN_WIDTH = 720
-    WINDOW_MIN_HEIGHT = 620
+    HISTORY_BTN_BG = "#0F172A"
+    HISTORY_BTN_HOVER = "#1E293B"
 
-    def __init__(self, root: tk.Tk) -> None:
+    REVERT_CARD_BTN_BG = "#2563EB"
+    REVERT_CARD_BTN_HOVER = "#1D4ED8"
+
+    WINDOW_DEFAULT_WIDTH = 860
+    WINDOW_DEFAULT_HEIGHT = 750
+    WINDOW_MIN_WIDTH = 740
+    WINDOW_MIN_HEIGHT = 640
+
+    def __init__(
+        self, root: tk.Tk, history_file_path: Optional[Path] = None
+    ) -> None:
         self.root = root
         self.root.title("Easy File Organizer")
         self.root.configure(bg=self.BG_WINDOW)
 
-        # Requirement 2: Make the window freely resizable with comfortable minsize
         self.root.resizable(True, True)
         self.root.minsize(self.WINDOW_MIN_WIDTH, self.WINDOW_MIN_HEIGHT)
 
-        # Attach embedded custom organizer icon
         self._icon_refs = apply_app_icon(self.root)
-
-        # Center the window on launch
         self._center_window(self.WINDOW_DEFAULT_WIDTH, self.WINDOW_DEFAULT_HEIGHT)
 
-        # Remember this script's path so it never moves itself
         try:
             self.script_path = Path(__file__).resolve()
         except (NameError, OSError):
             self.script_path = Path.cwd() / "file_organizer.py"
 
-        # Requirement 1: Dynamic Candidate Folder Queue
+        # Persistent JSON History Storage
+        self.history_file_path: Path = (
+            history_file_path
+            if history_file_path is not None
+            else get_default_history_file_path()
+        )
+        self.history_sessions: List[Dict[str, Any]] = load_history_sessions(
+            self.history_file_path
+        )
+
+        # Dynamic Candidate Folder Queue
         self.candidate_folders: List[Path] = []
         for default_name in ("Downloads", "Desktop", "Documents"):
             resolved_dir = resolve_user_folder(default_name)
@@ -1316,7 +1467,6 @@ class FriendlyFileOrganizerApp:
         self.ranked_folders: List[Path] = list(self.candidate_folders)
         self.queue_buttons: Dict[str, RoundedButton] = {}
 
-        # Scan & rank folders on startup, and auto-focus the messiest folder first
         self._recalculate_folder_rankings()
         self.current_folder: Path = (
             self.ranked_folders[0]
@@ -1325,9 +1475,10 @@ class FriendlyFileOrganizerApp:
         )
 
         self.details_expanded: bool = False
+        self.history_expanded: bool = False
         self.running_elevated: bool = is_running_with_elevated_privileges()
 
-        # Undo Transaction Log [(moved_dest_path, original_source_path), ...]
+        # In-memory mirror of the latest revertible transaction for compatibility
         self.last_transaction: List[Tuple[Path, Path]] = []
 
         # Live Auto-Sort Background Watcher State
@@ -1337,11 +1488,12 @@ class FriendlyFileOrganizerApp:
         self._watcher_stop_event = threading.Event()
         self._watcher_thread: Optional[threading.Thread] = None
         self._watched_file_states: Dict[Path, Tuple[int, int, float]] = {}
-        self._pending_auto_sorted: List[Tuple[Path, Path, str]] = []
+        self._pending_auto_sorted: List[Dict[str, Any]] = []
 
         self._build_ui()
         self._refresh_folder_queue_ui()
         self._update_folder_display()
+        self._sync_history_controls()
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -1358,6 +1510,215 @@ class FriendlyFileOrganizerApp:
         x = max((screen_w - width) // 2, 20)
         y = max((screen_h - height) // 2 - 20, 20)
         self.root.geometry(f"{width}x{height}+{x}+{y}")
+
+    # ==========================================================================
+    # PERSISTENT SESSION HISTORY MANAGEMENT & MULTI-SESSION ROLLBACK
+    # ==========================================================================
+
+    def _record_history_session(
+        self,
+        target_folder: Path,
+        manifest_entries: List[Dict[str, Any]],
+        source_type: str = "manual",
+    ) -> Dict[str, Any]:
+        """
+        Create a structured session record, prepend it to `self.history_sessions`
+        (reverse chronological order), and save to `history.json`.
+        """
+        now = datetime.now()
+        session: Dict[str, Any] = {
+            "session_id": str(uuid.uuid4()),
+            "timestamp": format_human_timestamp(now),
+            "created_at_iso": now.isoformat(),
+            "source": source_type,
+            "target_folder": str(target_folder),
+            "target_folder_name": target_folder.name or str(target_folder),
+            "status": "completed",
+            "files": manifest_entries,
+        }
+        self.history_sessions.insert(0, session)
+        save_history_sessions(self.history_file_path, self.history_sessions)
+        self._sync_history_controls()
+        return session
+
+    def _get_latest_revertible_session(self) -> Optional[Dict[str, Any]]:
+        """Return the most recent session whose status is not 'reverted'."""
+        for session in self.history_sessions:
+            if session.get("status") in ("completed", "partially_reverted"):
+                files = session.get("files", [])
+                if any(not f.get("reverted", False) for f in files):
+                    return session
+        return None
+
+    def _sync_history_controls(self) -> None:
+        """
+        Update the `[↩ Undo Last Organize]` button state, the `[📜 View History]`
+        button badge, and re-render the History & Rollback drawer cards if open.
+        """
+        latest = self._get_latest_revertible_session()
+        if latest is not None:
+            self.last_transaction = [
+                (Path(f["current_path"]), Path(f["original_path"]))
+                for f in latest.get("files", [])
+                if not f.get("reverted", False)
+            ]
+            self.undo_btn.set_enabled(True)
+        else:
+            self.last_transaction = []
+            self.undo_btn.set_enabled(False)
+
+        total_sessions = len(self.history_sessions)
+        prefix = "▾" if self.history_expanded else "📜"
+        self.history_btn.set_text(f"{prefix} View History ({total_sessions})")
+
+        if self.history_expanded:
+            self._render_history_cards()
+
+    def revert_session_by_id(self, session_id: str) -> int:
+        """
+        Requirement 2 (Selective Multi-Session Rollback):
+        Safely revert a specific historical cleaning session by `session_id`:
+        - Verifies each file is still at `current_path`.
+        - Applies safe duplicate numbering if `original_path` now has a conflict.
+        - Skips and flags any files manually deleted or moved by the user without
+          halting the rest of the rollback.
+        - Updates the session status to `reverted` or `partially_reverted` and
+          saves `history.json`.
+        """
+        with self._op_lock:
+            target_session: Optional[Dict[str, Any]] = None
+            for sess in self.history_sessions:
+                if sess.get("session_id") == session_id:
+                    target_session = sess
+                    break
+
+            if target_session is None:
+                return 0
+
+            files_manifest: List[Dict[str, Any]] = target_session.get("files", [])
+            if not files_manifest:
+                target_session["status"] = "reverted"
+                save_history_sessions(self.history_file_path, self.history_sessions)
+                self._sync_history_controls()
+                return 0
+
+            restored_count = 0
+            skipped_count = 0
+            reserved_restore_paths: Set[str] = set()
+            restore_details: List[str] = []
+            restore_warnings: List[str] = []
+            restored_folder: Optional[Path] = None
+
+            # Process in reverse order of move
+            for entry in reversed(files_manifest):
+                if entry.get("reverted", False):
+                    continue
+
+                moved_dest_path = Path(entry.get("current_path", ""))
+                original_source_path = Path(entry.get("original_path", ""))
+                expected_size = entry.get("file_size")
+
+                try:
+                    base_dir = original_source_path.parent
+                    restored_folder = base_dir
+                    is_blocked, _ = is_protected_system_path(base_dir)
+                    if is_blocked:
+                        skipped_count += 1
+                        restore_warnings.append(
+                            f"Blocked restore to protected folder '{base_dir}'."
+                        )
+                        continue
+
+                    if not moved_dest_path.exists():
+                        skipped_count += 1
+                        restore_warnings.append(
+                            f"Skipped '{moved_dest_path.name}' because it was moved or removed since that session."
+                        )
+                        continue
+
+                    is_safe, clean_orig_name, _ = inspect_and_sanitize_filename(
+                        original_source_path.name
+                    )
+                    target_name = (
+                        clean_orig_name if is_safe else moved_dest_path.name
+                    )
+
+                    safe_restore_path = get_safe_destination_path(
+                        base_dir, target_name, reserved_restore_paths
+                    )
+
+                    success, warn_msg = atomic_verified_restore(
+                        moved_path=moved_dest_path,
+                        restore_dest=safe_restore_path,
+                        base_dir=base_dir,
+                        expected_record_size=expected_size,
+                    )
+
+                    if success:
+                        entry["reverted"] = True
+                        entry["restored_to"] = str(safe_restore_path)
+                        reserved_restore_paths.add(
+                            os.path.normcase(str(safe_restore_path))
+                        )
+                        restored_count += 1
+                        if safe_restore_path.name != original_source_path.name:
+                            restore_details.append(
+                                f"↩ Restored '{moved_dest_path.name}' as '{safe_restore_path.name}' (to avoid conflict)"
+                            )
+                        else:
+                            restore_details.append(
+                                f"↩ Restored '{original_source_path.name}' back to {base_dir.name}"
+                            )
+                    else:
+                        skipped_count += 1
+                        if warn_msg:
+                            restore_warnings.append(warn_msg)
+
+                except (PermissionError, OSError, ValueError) as exc:
+                    skipped_count += 1
+                    restore_warnings.append(
+                        f"Could not restore '{moved_dest_path.name}' ({exc.__class__.__name__})."
+                    )
+
+            # Update session status based on per-file reversion state
+            all_reverted = all(f.get("reverted", False) for f in files_manifest)
+            any_reverted = any(f.get("reverted", False) for f in files_manifest)
+            if all_reverted:
+                target_session["status"] = "reverted"
+            elif any_reverted:
+                target_session["status"] = "partially_reverted"
+
+            save_history_sessions(self.history_file_path, self.history_sessions)
+
+            if restored_folder is not None and restored_folder.exists():
+                self._add_candidate_folder_internal(restored_folder)
+                self.current_folder = restored_folder
+
+            self._recalculate_folder_rankings()
+            self._refresh_folder_queue_ui()
+            self._update_folder_display()
+            self._update_watcher_badge()
+            self._sync_history_controls()
+
+            spot_word = (
+                "file back to its original spot"
+                if restored_count == 1
+                else "files back to their original spots"
+            )
+            if restored_count > 0:
+                banner_msg = f"Restored {restored_count} {spot_word}."
+                self._show_banner(
+                    banner_msg, is_success=True, warnings=restore_warnings
+                )
+            else:
+                self._show_banner(
+                    "Could not restore files because they were moved or are currently open.",
+                    is_success=False,
+                    warnings=restore_warnings,
+                )
+
+            self._set_advanced_details(restore_details + restore_warnings)
+            return restored_count
 
     # ==========================================================================
     # DYNAMIC "MESSY FOLDERS" QUEUE & AUTO-PRIORITIZATION ENGINE
@@ -1390,10 +1751,6 @@ class FriendlyFileOrganizerApp:
 
         self.folder_loose_counts = counts
 
-        # Sort by:
-        # 1. Whether folder has loose files (messy first, clean demoted to end)
-        # 2. Descending loose file count (messiest first)
-        # 3. Original insertion index (stable tie-breaker)
         indexed = list(enumerate(self.candidate_folders))
         indexed.sort(
             key=lambda pair: (
@@ -1415,8 +1772,7 @@ class FriendlyFileOrganizerApp:
     def _refresh_folder_queue_ui(self) -> None:
         """
         Rebuild the Step 1 dynamic folder queue buttons in ranked order
-        (messiest folders first, clean folders demoted to the end, followed by
-        [📂 Browse / Add Folder...]).
+        (messiest folders first, clean folders demoted to the end).
         """
         for child in self.queue_container.winfo_children():
             child.destroy()
@@ -1482,7 +1838,7 @@ class FriendlyFileOrganizerApp:
         self.browse_btn.pack(side=tk.LEFT, padx=(0, 4), pady=3)
 
     # ==========================================================================
-    # RESPONSIVE UI CONSTRUCTION (GRID WEIGHTS & DYNAMIC WRAPLENGTH)
+    # RESPONSIVE UI CONSTRUCTION
     # ==========================================================================
 
     def _create_card(
@@ -1495,25 +1851,23 @@ class FriendlyFileOrganizerApp:
             highlightbackground=self.BORDER_CARD,
             highlightthickness=1,
             padx=20,
-            pady=14,
+            pady=13,
         )
         card.grid(row=row, column=0, sticky=sticky, pady=pady)
         card.columnconfigure(0, weight=1)
         return card
 
     def _build_ui(self) -> None:
-        """
-        Build the responsive 3-step visual interface using Tkinter grid weights
-        so cards scale horizontally and the bottom log expands vertically.
-        """
+        """Build the responsive 3-step visual interface + History & Rollback drawer."""
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
 
-        self.main_column = tk.Frame(self.root, bg=self.BG_WINDOW, padx=26, pady=14)
+        self.main_column = tk.Frame(self.root, bg=self.BG_WINDOW, padx=26, pady=12)
         self.main_column.grid(row=0, column=0, sticky="nsew")
         self.main_column.columnconfigure(0, weight=1)
-        # Row 5 (details drawer) expands vertically when window is resized/maximized
-        self.main_column.rowconfigure(5, weight=1)
+        # Rows 4 (history drawer) and 6 (details drawer) share vertical expansion weight
+        self.main_column.rowconfigure(4, weight=1)
+        self.main_column.rowconfigure(6, weight=1)
 
         # --- Row 0: App Header ---
         header = tk.Frame(self.main_column, bg=self.BG_WINDOW)
@@ -1531,7 +1885,7 @@ class FriendlyFileOrganizerApp:
 
         os_label = "macOS" if CURRENT_OS == "Darwin" else CURRENT_OS
         sub_text = (
-            f"Smart Priority Queue ({os_label}) — Messiest folders automatically come first."
+            f"Smart Priority Queue & Rollback History ({os_label}) — Non-destructive sorting."
         )
         if self.running_elevated:
             priv_name = "Administrator" if CURRENT_OS == "Windows" else "root"
@@ -1564,7 +1918,6 @@ class FriendlyFileOrganizerApp:
             anchor="w",
         ).grid(row=0, column=0, sticky="w")
 
-        # Dynamic folder queue container
         self.queue_container = tk.Frame(step1_card, bg=self.BG_CARD)
         self.queue_container.grid(row=1, column=0, sticky="ew", pady=(0, 8))
 
@@ -1627,13 +1980,13 @@ class FriendlyFileOrganizerApp:
         self.badges_container.grid(row=2, column=0, sticky="ew")
 
         # ======================================================================
-        # ROW 3 — STEP 3: ORGANIZE, UNDO & LIVE AUTO-SORT WATCHER
+        # ROW 3 — STEP 3: ORGANIZE, UNDO, VIEW HISTORY & LIVE AUTO-SORT
         # ======================================================================
         step3_card = self._create_card(self.main_column, row=3, pady=(0, 6))
 
         tk.Label(
             step3_card,
-            text="Step 3: Organize",
+            text="Step 3: Organize & Rollback History",
             font=(UI_FONT, 11, "bold"),
             fg=self.TEXT_PRIMARY,
             bg=self.BG_CARD,
@@ -1649,13 +2002,13 @@ class FriendlyFileOrganizerApp:
         self.organize_btn = RoundedButton(
             action_group,
             text="✨ Organize My Files",
-            width=255,
+            width=235,
             height=44,
             corner_radius=12,
             bg_color=self.ORGANIZE_BTN_BG,
             hover_color=self.ORGANIZE_BTN_HOVER,
             fg_color="#FFFFFF",
-            font=(UI_FONT, 12, "bold"),
+            font=(UI_FONT, 11, "bold"),
             canvas_bg=self.BG_CARD,
             command=self._run_organize_files,
         )
@@ -1664,7 +2017,7 @@ class FriendlyFileOrganizerApp:
         self.undo_btn = RoundedButton(
             action_group,
             text="↩ Undo Last Organize",
-            width=190,
+            width=185,
             height=44,
             corner_radius=12,
             bg_color=self.UNDO_BTN_BG,
@@ -1675,7 +2028,22 @@ class FriendlyFileOrganizerApp:
             enabled=False,
             command=self._run_undo_last_organize,
         )
-        self.undo_btn.pack(side=tk.LEFT)
+        self.undo_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.history_btn = RoundedButton(
+            action_group,
+            text="📜 View History (0)",
+            width=175,
+            height=44,
+            corner_radius=12,
+            bg_color=self.HISTORY_BTN_BG,
+            hover_color=self.HISTORY_BTN_HOVER,
+            fg_color="#FFFFFF",
+            font=(UI_FONT, 10, "bold"),
+            canvas_bg=self.BG_CARD,
+            command=self._toggle_history_drawer,
+        )
+        self.history_btn.pack(side=tk.LEFT)
 
         watcher_row = tk.Frame(
             step3_card,
@@ -1739,10 +2107,76 @@ class FriendlyFileOrganizerApp:
         )
 
         # ======================================================================
-        # ROW 4 & 5 — COLLAPSIBLE / EXPANDABLE ACTIVITY DETAILS VIEW
+        # ROW 4 — DEDICATED "HISTORY & ROLLBACK" DRAWER (TOGGLED BY VIEW HISTORY)
+        # ======================================================================
+        self.history_drawer = tk.Frame(
+            self.main_column,
+            bg=self.BG_CARD,
+            highlightbackground=self.BORDER_CARD,
+            highlightthickness=1,
+            padx=16,
+            pady=12,
+        )
+        self.history_drawer.columnconfigure(0, weight=1)
+        self.history_drawer.rowconfigure(1, weight=1)
+
+        history_header = tk.Frame(self.history_drawer, bg=self.BG_CARD)
+        history_header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        history_header.columnconfigure(0, weight=1)
+
+        tk.Label(
+            history_header,
+            text="📜 Past Cleaning Sessions (Reverse Chronological — Click any session to revert)",
+            font=(UI_FONT, 10, "bold"),
+            fg=self.TEXT_PRIMARY,
+            bg=self.BG_CARD,
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w")
+
+        # Scrollable canvas for history session cards
+        history_body = tk.Frame(self.history_drawer, bg=self.BG_CARD)
+        history_body.grid(row=1, column=0, sticky="nsew")
+        history_body.columnconfigure(0, weight=1)
+        history_body.rowconfigure(0, weight=1)
+
+        self.history_canvas = tk.Canvas(
+            history_body,
+            bg="#F8FAFC",
+            highlightthickness=1,
+            highlightbackground="#E2E8F0",
+            height=155,
+        )
+        self.history_scrollbar = ttk.Scrollbar(
+            history_body, orient=tk.VERTICAL, command=self.history_canvas.yview
+        )
+        self.history_cards_frame = tk.Frame(self.history_canvas, bg="#F8FAFC", padx=8, pady=6)
+
+        self.history_canvas_window = self.history_canvas.create_window(
+            (0, 0), window=self.history_cards_frame, anchor="nw"
+        )
+        self.history_canvas.configure(yscrollcommand=self.history_scrollbar.set)
+
+        self.history_cards_frame.bind(
+            "<Configure>",
+            lambda _e: self.history_canvas.configure(
+                scrollregion=self.history_canvas.bbox("all")
+            ),
+        )
+        self.history_canvas.bind(
+            "<Configure>",
+            lambda e: self.history_canvas.itemconfigure(
+                self.history_canvas_window, width=e.width
+            ),
+        )
+
+        self.history_canvas.grid(row=0, column=0, sticky="nsew")
+        self.history_scrollbar.grid(row=0, column=1, sticky="ns")
+
+        # ======================================================================
+        # ROW 5 & 6 — COLLAPSIBLE / EXPANDABLE ACTIVITY DETAILS VIEW
         # ======================================================================
         advanced_bar = tk.Frame(self.main_column, bg=self.BG_WINDOW)
-        advanced_bar.grid(row=4, column=0, sticky="ew", pady=(2, 4))
+        advanced_bar.grid(row=5, column=0, sticky="ew", pady=(2, 4))
 
         self.toggle_details_btn = tk.Label(
             advanced_bar,
@@ -1787,7 +2221,6 @@ class FriendlyFileOrganizerApp:
         self.status_box.grid(row=0, column=0, sticky="nsew")
         scrollbar.grid(row=0, column=1, sticky="ns")
 
-        # Bind responsive wraplength adjustment when window is resized
         self.main_column.bind("<Configure>", self._on_main_column_resize)
 
     def _on_main_column_resize(self, event) -> None:
@@ -1797,6 +2230,113 @@ class FriendlyFileOrganizerApp:
             self.preview_summary_label.configure(wraplength=new_wrap)
             self.status_banner.configure(wraplength=new_wrap)
             self.warning_label.configure(wraplength=new_wrap)
+
+    # ==========================================================================
+    # HISTORY & ROLLBACK DRAWER UI RENDERING
+    # ==========================================================================
+
+    def _toggle_history_drawer(self) -> None:
+        """Open or close the dedicated History & Rollback drawer."""
+        self.history_expanded = not self.history_expanded
+        if self.history_expanded:
+            self._render_history_cards()
+            self.history_drawer.grid(row=4, column=0, sticky="nsew", pady=(2, 6))
+            self.root.update_idletasks()
+            cur_w = self.root.winfo_width()
+            cur_h = self.root.winfo_height()
+            if cur_h < 840:
+                self.root.geometry(f"{cur_w}x850")
+        else:
+            self.history_drawer.grid_forget()
+
+        self._sync_history_controls()
+
+    def _render_history_cards(self) -> None:
+        """
+        Render past cleaning sessions in reverse chronological order inside
+        `self.history_cards_frame`:
+        Example card: `[Downloads] - Nov 8, 2026, 3:45 PM • 18 files moved • [Revert This Clean]`
+        """
+        for child in self.history_cards_frame.winfo_children():
+            child.destroy()
+
+        if not self.history_sessions:
+            empty_lbl = tk.Label(
+                self.history_cards_frame,
+                text="No past cleaning sessions recorded yet. Click 'Organize My Files' to create your first session!",
+                font=(UI_FONT, 10),
+                fg=self.TEXT_SECONDARY,
+                bg="#F8FAFC",
+                pady=18,
+            )
+            empty_lbl.pack(fill=tk.X)
+            return
+
+        for session in self.history_sessions:
+            sess_id = session.get("session_id", "")
+            folder_name = session.get("target_folder_name") or Path(
+                session.get("target_folder", "Folder")
+            ).name
+            timestamp = session.get("timestamp", "Unknown date")
+            status = session.get("status", "completed")
+            files = session.get("files", [])
+            total_files = len(files)
+            remaining_files = sum(
+                1 for f in files if not f.get("reverted", False)
+            )
+            file_word = "file" if total_files == 1 else "files"
+
+            card = tk.Frame(
+                self.history_cards_frame,
+                bg="#FFFFFF",
+                highlightbackground="#CBD5E1",
+                highlightthickness=1,
+                padx=12,
+                pady=8,
+            )
+            card.pack(fill=tk.X, pady=3)
+
+            if status == "reverted" or remaining_files == 0:
+                status_tag = " (Reverted)"
+                btn_text = "✓ Reverted"
+                can_revert = False
+            elif status == "partially_reverted":
+                status_tag = f" ({remaining_files} remaining)"
+                btn_text = "↩ Revert This Clean"
+                can_revert = True
+            else:
+                status_tag = ""
+                btn_text = "↩ Revert This Clean"
+                can_revert = True
+
+            summary_text = (
+                f"[{folder_name}] - {timestamp}  •  {total_files} {file_word} moved{status_tag}"
+            )
+
+            tk.Label(
+                card,
+                text=summary_text,
+                font=(UI_FONT, 9, "bold" if can_revert else "normal"),
+                fg=self.TEXT_PRIMARY if can_revert else "#64748B",
+                bg="#FFFFFF",
+                anchor="w",
+            ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+            revert_btn = RoundedButton(
+                card,
+                text=btn_text,
+                width=148,
+                height=30,
+                corner_radius=8,
+                bg_color=self.REVERT_CARD_BTN_BG,
+                hover_color=self.REVERT_CARD_BTN_HOVER,
+                fg_color="#FFFFFF",
+                font=(UI_FONT, 9, "bold"),
+                canvas_bg="#FFFFFF",
+                enabled=can_revert,
+                command=lambda sid=sess_id: self.revert_session_by_id(sid),
+            )
+            revert_btn.pack(side=tk.RIGHT, padx=(8, 0))
 
     # ==========================================================================
     # VISUAL CATEGORY BADGE RENDERING & ADVANCED TOGGLE
@@ -1917,8 +2457,7 @@ class FriendlyFileOrganizerApp:
             self.toggle_details_btn.configure(
                 text="▾ Hide individual file details (advanced)"
             )
-            self.details_drawer.grid(row=5, column=0, sticky="nsew", pady=(2, 0))
-            # If window height is compact, expand slightly to show the log comfortably
+            self.details_drawer.grid(row=6, column=0, sticky="nsew", pady=(2, 0))
             self.root.update_idletasks()
             cur_w = self.root.winfo_width()
             cur_h = self.root.winfo_height()
@@ -2009,7 +2548,7 @@ class FriendlyFileOrganizerApp:
         self._run_safe_preview(show_error_modal=False)
 
     # ==========================================================================
-    # STEP 2 (SAFE PREVIEW) & STEP 3 (ORGANIZE + AUTO-ADVANCE + UNDO)
+    # STEP 2 (SAFE PREVIEW) & STEP 3 (ORGANIZE + PERSISTENT HISTORY + UNDO)
     # ==========================================================================
 
     def _scan_eligible_files(
@@ -2148,9 +2687,9 @@ class FriendlyFileOrganizerApp:
 
     def _run_organize_files(self) -> None:
         """
-        Step 3: Move loose files into neat category subfolders, record Undo transaction,
-        demote the cleaned folder in the queue, and automatically advance to the next
-        messiest folder if one exists!
+        Step 3: Move loose files into neat category subfolders, persist the session
+        to `history.json`, demote the cleaned folder in the queue, and auto-advance
+        to the next messiest folder if one exists.
         """
         with self._op_lock:
             organized_folder = self.current_folder
@@ -2185,7 +2724,7 @@ class FriendlyFileOrganizerApp:
             reserved_destinations: Set[str] = set()
             moved_details: List[str] = []
             skipped_warnings: List[str] = list(security_notes)
-            current_transaction: List[Tuple[Path, Path]] = []
+            manifest_entries: List[Dict[str, Any]] = []
 
             for file_path, sanitized_name in eligible_items:
                 try:
@@ -2195,7 +2734,7 @@ class FriendlyFileOrganizerApp:
                         category_dir, sanitized_name, reserved_destinations
                     )
 
-                    success, warn_msg = atomic_verified_move(
+                    success, warn_msg, file_size, file_hash = atomic_verified_move(
                         source_path=file_path,
                         dest_path=safe_dest,
                         base_dir=organized_folder,
@@ -2204,7 +2743,16 @@ class FriendlyFileOrganizerApp:
 
                     if success:
                         reserved_destinations.add(os.path.normcase(str(safe_dest)))
-                        current_transaction.append((safe_dest, file_path))
+                        manifest_entries.append(
+                            {
+                                "original_path": str(file_path),
+                                "current_path": str(safe_dest),
+                                "filename": safe_dest.name,
+                                "file_size": file_size,
+                                "file_hash": file_hash,
+                                "reverted": False,
+                            }
+                        )
                         moved_count += 1
                         moved_counts_by_cat[category] = (
                             moved_counts_by_cat.get(category, 0) + 1
@@ -2228,17 +2776,18 @@ class FriendlyFileOrganizerApp:
 
             file_word = "file" if moved_count == 1 else "files"
             if moved_count > 0:
-                self.last_transaction = current_transaction
-                self.undo_btn.set_enabled(True)
+                # Save persistent session record to history.json
+                self._record_history_session(
+                    target_folder=organized_folder,
+                    manifest_entries=manifest_entries,
+                    source_type="manual",
+                )
 
-                # Re-rank all candidate folders after organizing
                 self._recalculate_folder_rankings()
                 remaining_in_current = self.folder_loose_counts.get(
                     self._folder_key(organized_folder), 0
                 )
 
-                # Auto-Demotion & Progression: if current folder reached 0 loose files
-                # and another queued folder still has loose files, transition to it!
                 next_messy_folder: Optional[Path] = None
                 if remaining_in_current == 0 and self.ranked_folders:
                     top_candidate = self.ranked_folders[0]
@@ -2299,108 +2848,15 @@ class FriendlyFileOrganizerApp:
 
             self._set_advanced_details(moved_details + skipped_warnings)
 
-    def _run_undo_last_organize(self) -> None:
+    def _run_undo_last_organize(self) -> int:
         """
-        Safely reverse `self.last_transaction`, moving sorted files back to their
-        original locations, re-ranking the folder queue, and focusing the restored folder.
+        Revert the most recent revertible session from persistent history.
         """
-        with self._op_lock:
-            if not self.last_transaction:
-                self.undo_btn.set_enabled(False)
-                return
-
-            restored_count = 0
-            reserved_restore_paths: Set[str] = set()
-            restore_details: List[str] = []
-            restore_warnings: List[str] = []
-            remaining_transaction: List[Tuple[Path, Path]] = []
-            restored_folder: Optional[Path] = None
-
-            for moved_dest_path, original_source_path in reversed(self.last_transaction):
-                try:
-                    base_dir = original_source_path.parent
-                    restored_folder = base_dir
-                    is_blocked, _ = is_protected_system_path(base_dir)
-                    if is_blocked:
-                        restore_warnings.append(
-                            f"Blocked restore to protected folder '{base_dir}'."
-                        )
-                        continue
-
-                    is_safe, clean_orig_name, _ = inspect_and_sanitize_filename(
-                        original_source_path.name
-                    )
-                    target_name = (
-                        clean_orig_name if is_safe else moved_dest_path.name
-                    )
-
-                    safe_restore_path = get_safe_destination_path(
-                        base_dir, target_name, reserved_restore_paths
-                    )
-
-                    success, warn_msg = atomic_verified_restore(
-                        moved_path=moved_dest_path,
-                        restore_dest=safe_restore_path,
-                        base_dir=base_dir,
-                    )
-
-                    if success:
-                        reserved_restore_paths.add(
-                            os.path.normcase(str(safe_restore_path))
-                        )
-                        restored_count += 1
-                        if safe_restore_path.name != original_source_path.name:
-                            restore_details.append(
-                                f"↩ Restored '{moved_dest_path.name}' as '{safe_restore_path.name}' (to avoid conflict)"
-                            )
-                        else:
-                            restore_details.append(
-                                f"↩ Restored '{original_source_path.name}' back to {base_dir.name}"
-                            )
-                    else:
-                        remaining_transaction.append(
-                            (moved_dest_path, original_source_path)
-                        )
-                        if warn_msg:
-                            restore_warnings.append(warn_msg)
-
-                except (PermissionError, OSError, ValueError) as exc:
-                    remaining_transaction.append(
-                        (moved_dest_path, original_source_path)
-                    )
-                    restore_warnings.append(
-                        f"Could not restore '{moved_dest_path.name}' ({exc.__class__.__name__})."
-                    )
-
-            self.last_transaction = list(reversed(remaining_transaction))
-            self.undo_btn.set_enabled(bool(self.last_transaction))
-
-            if restored_folder is not None:
-                self.current_folder = restored_folder
-
-            self._recalculate_folder_rankings()
-            self._refresh_folder_queue_ui()
-            self._update_folder_display()
-            self._update_watcher_badge()
-
-            spot_word = (
-                "file back to its original spot"
-                if restored_count == 1
-                else "files back to their original spots"
-            )
-            if restored_count > 0:
-                banner_msg = f"Restored {restored_count} {spot_word}."
-                self._show_banner(
-                    banner_msg, is_success=True, warnings=restore_warnings
-                )
-            else:
-                self._show_banner(
-                    "Could not restore files because they were moved or are currently open.",
-                    is_success=False,
-                    warnings=restore_warnings,
-                )
-
-            self._set_advanced_details(restore_details + restore_warnings)
+        latest = self._get_latest_revertible_session()
+        if latest is None:
+            self.undo_btn.set_enabled(False)
+            return 0
+        return self.revert_session_by_id(latest["session_id"])
 
     # ==========================================================================
     # FEATURE 3: "AUTO-SORT" BACKGROUND WATCHER (LIVE WATCHER)
@@ -2523,7 +2979,7 @@ class FriendlyFileOrganizerApp:
                     category_dir, sanitized_name, reserved_destinations
                 )
 
-                success, _ = atomic_verified_move(
+                success, _, file_size, file_hash = atomic_verified_move(
                     source_path=file_path,
                     dest_path=safe_dest,
                     base_dir=target_folder,
@@ -2534,15 +2990,26 @@ class FriendlyFileOrganizerApp:
                     reserved_destinations.add(os.path.normcase(str(safe_dest)))
                     self._watched_file_states.pop(file_path, None)
                     self._pending_auto_sorted.append(
-                        (safe_dest, file_path, category)
+                        {
+                            "target_folder": str(target_folder),
+                            "category": category,
+                            "manifest_item": {
+                                "original_path": str(file_path),
+                                "current_path": str(safe_dest),
+                                "filename": safe_dest.name,
+                                "file_size": file_size,
+                                "file_hash": file_hash,
+                                "reverted": False,
+                            },
+                        }
                     )
         finally:
             self._op_lock.release()
 
     def _poll_watcher_ui_updates(self) -> None:
         """
-        Periodic main-thread callback that drains `self._pending_auto_sorted`
-        and updates the folder queue rankings, Undo button, badges, and banner.
+        Periodic main-thread callback that drains `self._pending_auto_sorted`,
+        saves a persistent watcher session to `history.json`, and updates the UI.
         """
         if self._watcher_stop_event.is_set():
             return
@@ -2553,13 +3020,19 @@ class FriendlyFileOrganizerApp:
                 self._pending_auto_sorted.clear()
 
             if drained:
-                batch_tx = [(dest, orig) for dest, orig, _ in drained]
+                batch_folder = Path(drained[0]["target_folder"])
+                manifest_entries = [d["manifest_item"] for d in drained]
                 batch_details = [
-                    f"🟢 Auto-sorted '{orig.name}' into {cat}"
-                    for _, orig, cat in drained
+                    f"🟢 Auto-sorted '{Path(d['manifest_item']['original_path']).name}' into {d['category']}"
+                    for d in drained
                 ]
-                self.last_transaction.extend(batch_tx)
-                self.undo_btn.set_enabled(True)
+
+                self._record_history_session(
+                    target_folder=batch_folder,
+                    manifest_entries=manifest_entries,
+                    source_type="auto_watcher",
+                )
+
                 self._recalculate_folder_rankings()
                 self._refresh_folder_queue_ui()
                 self._update_folder_display()

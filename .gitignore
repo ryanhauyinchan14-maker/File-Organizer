@@ -30,3 +30,10 @@ desktop.ini
 .idea/
 *.sublime-project
 *.sublime-workspace
+
+# Persistent organization history (prevent committing personal file paths)
+history.json
+*history.json
+EasyFileOrganizer/
+easy_file_organizer/
+
